@@ -13,4 +13,6 @@ public interface FlowRepository extends MongoRepository<Flow, ObjectId> {
     List<Flow> findByActividadOrigenId(ObjectId actividadOrigenId);
 
     List<Flow> findByActividadDestinoId(ObjectId actividadDestinoId);
+
+    List<Flow> findByActividadOrigenIdIn(List<ObjectId> actividadOrigenIds);
 }

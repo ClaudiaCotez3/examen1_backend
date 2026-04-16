@@ -33,4 +33,7 @@ public class Procedure {
 
     @Field("fecha_inicio")
     private LocalDateTime fechaInicio;
+
+    @Field("fecha_fin")
+    private LocalDateTime fechaFin;
 }

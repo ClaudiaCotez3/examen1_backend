@@ -17,4 +17,6 @@ public interface ActivityInstanceRepository extends MongoRepository<ActivityInst
     List<ActivityInstance> findByTramiteIdAndEstado(ObjectId tramiteId, String estado);
 
     List<ActivityInstance> findByActividadIdAndEstado(ObjectId actividadId, String estado);
+
+    List<ActivityInstance> findByEstado(String estado);
 }

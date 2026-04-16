@@ -78,6 +78,10 @@ public class MongoIndexInitializer {
                 .on("fecha_inicio", Sort.Direction.DESC));
         activityInstances.ensureIndex(new Index().on("tramite_id", Sort.Direction.ASC).on("estado", Sort.Direction.ASC));
         activityInstances.ensureIndex(new Index().on("actividad_id", Sort.Direction.ASC).on("estado", Sort.Direction.ASC));
+        // Phase 4 — operator Kanban global scan (no filters): sort by fecha_inicio DESC
+        activityInstances.ensureIndex(new Index()
+                .on("estado", Sort.Direction.ASC)
+                .on("fecha_inicio", Sort.Direction.DESC));
 
         // respuestas_formulario
         IndexOperations formResponses = mongoTemplate.indexOps(FormResponse.class);
