@@ -1,5 +1,6 @@
 package com.example.backend.dto;
 
+import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -27,4 +28,11 @@ public class ActivityRequestDTO {
     private String laneRef;
 
     private Boolean requiresForm;
+
+    /**
+     * Schema of the dynamic form attached to the activity.
+     * Sent by the frontend after extracting it from the BPMN extension elements.
+     */
+    @Valid
+    private FormDefinitionDTO formDefinition;
 }

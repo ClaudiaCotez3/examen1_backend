@@ -11,6 +11,7 @@ import com.example.backend.repository.RoleRepository;
 import com.example.backend.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
 import org.bson.types.ObjectId;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -23,6 +24,7 @@ public class UserService {
     private final UserRepository userRepository;
     private final RoleRepository roleRepository;
     private final UserMapper userMapper;
+    private final PasswordEncoder passwordEncoder;
 
     public UserResponseDTO create(UserRequestDTO request) {
         if (request.getPassword() == null || request.getPassword().isBlank()) {
@@ -37,9 +39,11 @@ public class UserService {
                 .orElseThrow(() -> new ResourceNotFoundException("Role", request.getRoleId()));
 
         User user = userMapper.toEntity(request);
+        user.setPassword(passwordEncoder.encode(request.getPassword()));
         user.setRolId(role.getId());
         user.setActivo(true);
         user.setFechaCreacion(LocalDateTime.now());
+        user.setFechaActualizacion(LocalDateTime.now());
 
         User saved = userRepository.save(user);
         return userMapper.toResponse(saved);
@@ -69,6 +73,12 @@ public class UserService {
                 .orElseThrow(() -> new ResourceNotFoundException("Role", request.getRoleId()));
 
         userMapper.updateEntity(user, request);
+
+        if (request.getPassword() != null && !request.getPassword().isBlank()) {
+            user.setPassword(passwordEncoder.encode(request.getPassword()));
+        }
+        user.setFechaActualizacion(LocalDateTime.now());
+
         User saved = userRepository.save(user);
         return userMapper.toResponse(saved);
     }
@@ -80,6 +90,7 @@ public class UserService {
             throw new BadRequestException("User is already deactivated");
         }
         user.setActivo(false);
+        user.setFechaActualizacion(LocalDateTime.now());
         userRepository.save(user);
     }
 

@@ -36,4 +36,7 @@ public class User {
 
     @Field("fecha_creacion")
     private LocalDateTime fechaCreacion;
+
+    @Field("fecha_actualizacion")
+    private LocalDateTime fechaActualizacion;
 }

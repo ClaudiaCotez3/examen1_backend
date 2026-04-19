@@ -6,6 +6,10 @@ import com.example.backend.model.User;
 import org.bson.types.ObjectId;
 import org.springframework.stereotype.Component;
 
+/**
+ * Pure structural mapping only. Password hashing is handled in UserService
+ * because mappers should not depend on security concerns.
+ */
 @Component
 public class UserMapper {
 
@@ -13,7 +17,6 @@ public class UserMapper {
         return User.builder()
                 .nombre(dto.getName())
                 .email(dto.getEmail())
-                .password(dto.getPassword())
                 .rolId(new ObjectId(dto.getRoleId()))
                 .build();
     }
@@ -33,8 +36,5 @@ public class UserMapper {
         user.setNombre(dto.getName());
         user.setEmail(dto.getEmail());
         user.setRolId(new ObjectId(dto.getRoleId()));
-        if (dto.getPassword() != null && !dto.getPassword().isBlank()) {
-            user.setPassword(dto.getPassword());
-        }
     }
 }

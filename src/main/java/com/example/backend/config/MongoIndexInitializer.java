@@ -83,10 +83,20 @@ public class MongoIndexInitializer {
                 .on("estado", Sort.Direction.ASC)
                 .on("fecha_inicio", Sort.Direction.DESC));
 
-        // respuestas_formulario
+        // respuestas_formulario (Phase 5 — single doc per submission, JSON data map)
         IndexOperations formResponses = mongoTemplate.indexOps(FormResponse.class);
-        formResponses.ensureIndex(new Index().on("instancia_actividad_id", Sort.Direction.ASC));
-        formResponses.ensureIndex(new Index().on("campo_id", Sort.Direction.ASC).on("valor", Sort.Direction.ASC));
+        // Drop legacy per-field index if it survives from the old "one doc per field" layout.
+        dropIndexIfExists(formResponses, "campo_id_1_valor_1");
+        // Drop the auto-created index from the previous @Indexed annotation
+        // (named after the field) so we can claim its key with our own named index.
+        dropIndexIfExists(formResponses, "instancia_actividad_id");
+        formResponses.ensureIndex(new Index()
+                .on("instancia_actividad_id", Sort.Direction.ASC)
+                .unique()
+                .named("uniq_form_response_por_instancia"));
+        formResponses.ensureIndex(new Index()
+                .on("submitted_by", Sort.Direction.ASC)
+                .on("submitted_at", Sort.Direction.DESC));
 
         // historial_tramite
         IndexOperations procedureHistory = mongoTemplate.indexOps(ProcedureHistory.class);

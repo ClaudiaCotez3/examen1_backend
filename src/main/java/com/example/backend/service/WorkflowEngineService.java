@@ -65,6 +65,7 @@ public class WorkflowEngineService {
     private final FlowRepository flowRepository;
     private final ProcedureHistoryRepository procedureHistoryRepository;
     private final MongoTemplate mongoTemplate;
+    private final FormService formService;
 
     private final CaseFileMapper caseFileMapper;
     private final ActivityInstanceMapper activityInstanceMapper;
@@ -197,6 +198,18 @@ public class WorkflowEngineService {
             throw new BadRequestException(
                     "Cannot complete activity: current status is '" + instance.getEstado()
                             + "'. Only IN_PROGRESS activities can be completed.");
+        }
+
+        // Phase 5 — gate completion on the form when the activity declares one.
+        // Loaded eagerly because the activity is also needed below; reusing the
+        // same lookup avoids a second round-trip for the form check.
+        Activity activityDef = activityRepository.findById(instance.getActividadId())
+                .orElseThrow(() -> new ResourceNotFoundException("Activity",
+                        instance.getActividadId().toHexString()));
+        if (Boolean.TRUE.equals(activityDef.getRequiereFormulario())
+                && !formService.hasResponse(instance.getId())) {
+            throw new BadRequestException(
+                    "Cannot complete activity: form must be submitted before completion");
         }
 
         LocalDateTime now = LocalDateTime.now();

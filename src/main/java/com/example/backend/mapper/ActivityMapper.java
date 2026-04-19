@@ -3,11 +3,15 @@ package com.example.backend.mapper;
 import com.example.backend.dto.ActivityRequestDTO;
 import com.example.backend.dto.ActivityResponseDTO;
 import com.example.backend.model.Activity;
+import lombok.RequiredArgsConstructor;
 import org.bson.types.ObjectId;
 import org.springframework.stereotype.Component;
 
 @Component
+@RequiredArgsConstructor
 public class ActivityMapper {
+
+    private final FormMapper formMapper;
 
     public Activity toEntity(ActivityRequestDTO dto, ObjectId policyId, ObjectId laneId) {
         return Activity.builder()
@@ -16,6 +20,7 @@ public class ActivityMapper {
                 .nombre(dto.getName())
                 .tipo(dto.getType())
                 .requiereFormulario(Boolean.TRUE.equals(dto.getRequiresForm()))
+                .formDefinition(formMapper.toEntity(dto.getFormDefinition()))
                 .build();
     }
 
@@ -27,6 +32,7 @@ public class ActivityMapper {
                 .name(activity.getNombre())
                 .type(activity.getTipo())
                 .requiresForm(activity.getRequiereFormulario())
+                .formDefinition(formMapper.toDefinitionDTO(activity.getFormDefinition()))
                 .build();
     }
 }
