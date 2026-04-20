@@ -26,9 +26,27 @@ public class PolicyVersionService {
     private final PolicyVersionMapper policyVersionMapper;
 
     public PolicyVersionResponseDTO createVersion(String policyId) {
-        ObjectId policyObjectId = parseObjectId(policyId, "policyId");
-        if (!policyRepository.existsById(policyObjectId)) {
-            throw new ResourceNotFoundException("BusinessPolicy", policyId);
+        return createVersionInternal(parseObjectId(policyId, "policyId"), null, true);
+    }
+
+    /**
+     * Mint a new version capturing a BPMN XML snapshot. Called from the
+     * full-save flow so every successful structural change leaves a
+     * historical trail without requiring a separate "snapshot" button.
+     *
+     * @param policyObjectId resolved policy id (avoids re-parsing in callers)
+     * @param bpmnXmlSnapshot diagram XML at the time of save (may be null)
+     */
+    public PolicyVersionResponseDTO createSnapshot(ObjectId policyObjectId, String bpmnXmlSnapshot) {
+        return createVersionInternal(policyObjectId, bpmnXmlSnapshot, false);
+    }
+
+    private PolicyVersionResponseDTO createVersionInternal(
+            ObjectId policyObjectId,
+            String bpmnXmlSnapshot,
+            boolean checkPolicyExists) {
+        if (checkPolicyExists && !policyRepository.existsById(policyObjectId)) {
+            throw new ResourceNotFoundException("BusinessPolicy", policyObjectId.toHexString());
         }
 
         List<PolicyVersion> existing = policyVersionRepository.findByPoliticaIdOrderByNumeroVersionDesc(policyObjectId);
@@ -38,6 +56,7 @@ public class PolicyVersionService {
                 .politicaId(policyObjectId)
                 .numeroVersion(nextNumber)
                 .estado(STATUS_INACTIVE)
+                .bpmnXmlSnapshot(bpmnXmlSnapshot)
                 .fechaPublicacion(LocalDateTime.now())
                 .build();
 

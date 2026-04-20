@@ -2,6 +2,8 @@ package com.example.backend.controller;
 
 import com.example.backend.dto.BusinessPolicyRequestDTO;
 import com.example.backend.dto.BusinessPolicyResponseDTO;
+import com.example.backend.dto.FullSaveRequestDTO;
+import com.example.backend.dto.FullSaveResponseDTO;
 import com.example.backend.dto.PolicyVersionResponseDTO;
 import com.example.backend.service.BusinessPolicyService;
 import com.example.backend.service.PolicyVersionService;
@@ -53,6 +55,20 @@ public class BusinessPolicyController {
     @PostMapping("/full")
     public ResponseEntity<BusinessPolicyResponseDTO> saveFull(@Valid @RequestBody BusinessPolicyRequestDTO request) {
         BusinessPolicyResponseDTO response = businessPolicyService.saveFullPolicyStructure(request);
+        return ResponseEntity.status(HttpStatus.CREATED).body(response);
+    }
+
+    /**
+     * Save BPMN XML + structured graph in a single shot.
+     *
+     * Preferred entry point for the visual designer. Persists the diagram
+     * XML on the policy, snapshots a new {@code PolicyVersion}, and returns
+     * a narrow {@code { policyId, status, versionNumber }} ack so the
+     * client can decide how much follow-up data it wants to fetch.
+     */
+    @PostMapping("/full-save")
+    public ResponseEntity<FullSaveResponseDTO> fullSave(@Valid @RequestBody FullSaveRequestDTO request) {
+        FullSaveResponseDTO response = businessPolicyService.fullSavePolicy(request);
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
 

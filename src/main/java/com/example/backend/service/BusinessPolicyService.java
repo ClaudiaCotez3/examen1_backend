@@ -6,8 +6,11 @@ import com.example.backend.dto.BusinessPolicyRequestDTO;
 import com.example.backend.dto.BusinessPolicyResponseDTO;
 import com.example.backend.dto.FlowRequestDTO;
 import com.example.backend.dto.FlowResponseDTO;
+import com.example.backend.dto.FullSaveRequestDTO;
+import com.example.backend.dto.FullSaveResponseDTO;
 import com.example.backend.dto.LaneRequestDTO;
 import com.example.backend.dto.LaneResponseDTO;
+import com.example.backend.dto.PolicyVersionResponseDTO;
 import com.example.backend.exception.BadRequestException;
 import com.example.backend.exception.ResourceNotFoundException;
 import com.example.backend.mapper.ActivityMapper;
@@ -55,6 +58,9 @@ public class BusinessPolicyService {
     private final LaneMapper laneMapper;
     private final ActivityMapper activityMapper;
     private final FlowMapper flowMapper;
+
+    private final BpmnXmlParser bpmnXmlParser;
+    private final PolicyVersionService policyVersionService;
 
     public BusinessPolicyResponseDTO createPolicy(BusinessPolicyRequestDTO request) {
         BusinessPolicy entity = policyMapper.toEntity(request);
@@ -166,7 +172,49 @@ public class BusinessPolicyService {
             throw ex;
         }
 
+        // Mint a snapshot AFTER the structural save succeeds so failed
+        // attempts don't leave phantom version records lying around.
+        policyVersionService.createSnapshot(savedPolicy.getId(), savedPolicy.getBpmnXml());
+
         return buildFullResponse(savedPolicy);
+    }
+
+    /**
+     * Single entry point for the visual designer: persists raw BPMN XML +
+     * structured graph in one call, mints a version snapshot, and returns
+     * a narrow ack ({@code policyId, status, versionNumber}).
+     *
+     * Resolution order for the structured graph:
+     *   1) {@code request.structure} when provided — preferred, since the
+     *      frontend already parsed the diagram and resolved catalog
+     *      references (form ids, user ids).
+     *   2) parser output otherwise — falls back to {@link BpmnXmlParser}
+     *      so legacy callers / external integrations can post pure XML.
+     */
+    public FullSaveResponseDTO fullSavePolicy(FullSaveRequestDTO request) {
+        BusinessPolicyRequestDTO structure = request.getStructure();
+        if (structure == null) {
+            structure = bpmnXmlParser.parse(request.getBpmnXml());
+        }
+        // Always overwrite the XML with what the caller actually sent — the
+        // parser-derived structure may not contain it, and the XML is the
+        // authoritative diagram representation.
+        structure.setBpmnXml(request.getBpmnXml());
+
+        BusinessPolicyResponseDTO saved = saveFullPolicyStructure(structure);
+
+        Integer versionNumber = policyVersionService
+                .getVersionsByPolicy(saved.getId())
+                .stream()
+                .findFirst()
+                .map(PolicyVersionResponseDTO::getVersionNumber)
+                .orElse(null);
+
+        return FullSaveResponseDTO.builder()
+                .policyId(saved.getId())
+                .status("saved")
+                .versionNumber(versionNumber)
+                .build();
     }
 
     private BusinessPolicyResponseDTO buildFullResponse(BusinessPolicy policy) {

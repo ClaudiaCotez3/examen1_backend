@@ -28,6 +28,19 @@ public class BusinessPolicy {
     /** DRAFT | ACTIVE | ARCHIVED (ARCHIVED is used for logical delete) */
     private String estado;
 
+    /**
+     * Authoritative BPMN 2.0 XML for the diagram. Stored so the visual
+     * designer can re-open the policy without losing positions or geometry,
+     * and so the parser can re-derive the structured graph if the
+     * normalized lanes/activities/flows ever drift out of sync.
+     *
+     * Nullable: pre-existing policies created before BPMN support and
+     * polices created via the plain `POST /api/policies` endpoint won't
+     * have an XML payload attached.
+     */
+    @Field("bpmn_xml")
+    private String bpmnXml;
+
     @Field("fecha_creacion")
     private LocalDateTime fechaCreacion;
 

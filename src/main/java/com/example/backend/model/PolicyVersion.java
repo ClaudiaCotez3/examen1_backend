@@ -30,6 +30,16 @@ public class PolicyVersion {
     /** ACTIVE | INACTIVE */
     private String estado;
 
+    /**
+     * BPMN XML captured at the moment this version was minted. Lets the
+     * audit log re-render any historical version of the diagram even after
+     * the live `BusinessPolicy.bpmnXml` has moved on.
+     *
+     * Nullable for back-compat with versions created before BPMN support.
+     */
+    @Field("bpmn_xml_snapshot")
+    private String bpmnXmlSnapshot;
+
     @Field("fecha_publicacion")
     private LocalDateTime fechaPublicacion;
 }

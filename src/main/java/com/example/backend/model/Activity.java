@@ -9,6 +9,8 @@ import org.springframework.data.annotation.Id;
 import org.springframework.data.mongodb.core.mapping.Document;
 import org.springframework.data.mongodb.core.mapping.Field;
 
+import java.util.List;
+
 @Data
 @Builder
 @NoArgsConstructor
@@ -49,4 +51,21 @@ public class Activity {
      */
     @Field("definicion_formulario")
     private FormDefinition formDefinition;
+
+    /**
+     * Operators (User ids) authorized to pick up this activity at runtime.
+     * Stored as an array so multiple users / a team can share the same
+     * activity (real-world workflows rarely have a single eligible
+     * assignee). Empty / null means "any operator".
+     */
+    @Field("usuarios_asignados")
+    private List<String> assignedUserIds;
+
+    /**
+     * Customer-supplied inputs the activity needs (e.g. "Documento de
+     * identidad", "Factura de luz"). Modeled as plain strings — a richer
+     * shape can come later if the UI needs typed requirements.
+     */
+    @Field("requerimientos")
+    private List<String> requirements;
 }

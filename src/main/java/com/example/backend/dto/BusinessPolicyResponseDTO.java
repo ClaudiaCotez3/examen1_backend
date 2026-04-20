@@ -18,6 +18,8 @@ public class BusinessPolicyResponseDTO {
     private String name;
     private String description;
     private String status;
+    /** Raw BPMN 2.0 XML for the diagram, when one was persisted. */
+    private String bpmnXml;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 

@@ -5,6 +5,8 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.util.List;
+
 @Data
 @Builder
 @NoArgsConstructor
@@ -18,4 +20,6 @@ public class ActivityResponseDTO {
     private String type;
     private Boolean requiresForm;
     private FormDefinitionDTO formDefinition;
+    private List<String> assignedUserIds;
+    private List<String> requirements;
 }

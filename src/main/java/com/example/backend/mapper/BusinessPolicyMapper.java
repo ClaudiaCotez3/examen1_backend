@@ -12,6 +12,7 @@ public class BusinessPolicyMapper {
         return BusinessPolicy.builder()
                 .nombre(dto.getName())
                 .descripcion(dto.getDescription())
+                .bpmnXml(dto.getBpmnXml())
                 .build();
     }
 
@@ -21,6 +22,7 @@ public class BusinessPolicyMapper {
                 .name(policy.getNombre())
                 .description(policy.getDescripcion())
                 .status(policy.getEstado())
+                .bpmnXml(policy.getBpmnXml())
                 .createdAt(policy.getFechaCreacion())
                 .updatedAt(policy.getFechaActualizacion())
                 .build();
@@ -29,5 +31,10 @@ public class BusinessPolicyMapper {
     public void updateEntity(BusinessPolicy policy, BusinessPolicyRequestDTO dto) {
         policy.setNombre(dto.getName());
         policy.setDescripcion(dto.getDescription());
+        // Only overwrite the stored XML when the caller actually provided one,
+        // so plain field updates don't accidentally wipe the diagram.
+        if (dto.getBpmnXml() != null) {
+            policy.setBpmnXml(dto.getBpmnXml());
+        }
     }
 }

@@ -23,6 +23,13 @@ public class BusinessPolicyRequestDTO {
     /** DRAFT | ACTIVE — optional on create (defaults to DRAFT). */
     private String status;
 
+    /**
+     * Raw BPMN 2.0 XML as exported by the visual designer. Sent with
+     * full-save calls so the diagram (with geometry + extension elements)
+     * round-trips. Optional for plain create/update.
+     */
+    private String bpmnXml;
+
     /** Used only by saveFullPolicyStructure — left null for plain create/update. */
     @Valid
     private List<LaneRequestDTO> lanes;
