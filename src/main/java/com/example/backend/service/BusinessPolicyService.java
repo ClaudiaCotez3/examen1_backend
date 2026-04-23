@@ -129,44 +129,7 @@ public class BusinessPolicyService {
         List<Flow> savedFlows = new ArrayList<>();
 
         try {
-            Map<String, ObjectId> laneIdByClientId = new HashMap<>();
-            for (LaneRequestDTO laneDto : request.getLanes()) {
-                Lane lane = laneMapper.toEntity(laneDto, savedPolicy.getId());
-                Lane saved = laneRepository.save(lane);
-                savedLanes.add(saved);
-                if (laneDto.getClientId() != null) {
-                    laneIdByClientId.put(laneDto.getClientId(), saved.getId());
-                }
-            }
-
-            Map<String, ObjectId> activityIdByClientId = new HashMap<>();
-            for (ActivityRequestDTO activityDto : request.getActivities()) {
-                ObjectId laneId = laneIdByClientId.get(activityDto.getLaneRef());
-                if (laneId == null) {
-                    throw new BadRequestException(
-                            "Activity '" + activityDto.getName() + "' references unknown lane: " + activityDto.getLaneRef());
-                }
-                Activity activity = activityMapper.toEntity(activityDto, savedPolicy.getId(), laneId);
-                Activity saved = activityRepository.save(activity);
-                savedActivities.add(saved);
-                if (activityDto.getClientId() != null) {
-                    activityIdByClientId.put(activityDto.getClientId(), saved.getId());
-                }
-            }
-
-            for (FlowRequestDTO flowDto : request.getFlows()) {
-                ObjectId sourceId = activityIdByClientId.get(flowDto.getSourceRef());
-                ObjectId targetId = activityIdByClientId.get(flowDto.getTargetRef());
-                if (sourceId == null) {
-                    throw new BadRequestException("Flow references unknown source activity: " + flowDto.getSourceRef());
-                }
-                if (targetId == null) {
-                    throw new BadRequestException("Flow references unknown target activity: " + flowDto.getTargetRef());
-                }
-                Flow flow = flowMapper.toEntity(flowDto, sourceId, targetId);
-                Flow saved = flowRepository.save(flow);
-                savedFlows.add(saved);
-            }
+            persistChildren(request, savedPolicy.getId(), savedLanes, savedActivities, savedFlows);
         } catch (RuntimeException ex) {
             savedFlows.forEach(flowRepository::delete);
             savedActivities.forEach(activityRepository::delete);
@@ -187,6 +150,107 @@ public class BusinessPolicyService {
         }
 
         return buildFullResponse(savedPolicy);
+    }
+
+    /**
+     * Replaces the full graph of an existing policy. Strategy: validate the
+     * incoming graph, wipe the current lanes/activities/flows, then re-insert
+     * from the payload. The policy document itself (name, description,
+     * bpmnXml, prerequisites, status) is updated in place so the Mongo `_id`
+     * and version history stay stable, and runtime {@link Procedure}s that
+     * reference a pinned {@link PolicyVersion} keep working against the
+     * snapshot that minted them.
+     */
+    public BusinessPolicyResponseDTO updateFullPolicyStructure(String id, BusinessPolicyRequestDTO request) {
+        validateGraph(request);
+
+        BusinessPolicy policy = findPolicyOrThrow(id);
+        policyMapper.updateEntity(policy, request);
+        if (request.getStatus() != null) {
+            policy.setEstado(resolveStatusOrDefault(request.getStatus()));
+        }
+        policy.setFechaActualizacion(LocalDateTime.now());
+        BusinessPolicy savedPolicy = policyRepository.save(policy);
+
+        // Wipe existing children so the re-insert starts from a clean slate.
+        // Flows are deleted first to avoid referencing soon-to-be-gone activities.
+        ObjectId policyId = savedPolicy.getId();
+        List<Activity> existingActivities = activityRepository.findByPoliticaId(policyId);
+        List<ObjectId> existingActivityIds = new ArrayList<>();
+        for (Activity a : existingActivities) {
+            existingActivityIds.add(a.getId());
+        }
+        if (!existingActivityIds.isEmpty()) {
+            List<Flow> existingFlows = flowRepository.findByActividadOrigenIdIn(existingActivityIds);
+            existingFlows.forEach(flowRepository::delete);
+        }
+        existingActivities.forEach(activityRepository::delete);
+        laneRepository.findByPoliticaIdOrderByPosicionAsc(policyId).forEach(laneRepository::delete);
+
+        List<Lane> savedLanes = new ArrayList<>();
+        List<Activity> savedActivities = new ArrayList<>();
+        List<Flow> savedFlows = new ArrayList<>();
+
+        // No rollback of the wipe on failure: Mongo doesn't give us a free
+        // transaction here, and restoring the old children would require
+        // keeping them buffered in memory. If the re-insert blows up the
+        // policy is left with whatever children made it in; the admin can
+        // retry the save to fix it. Validation above makes this unlikely.
+        persistChildren(request, policyId, savedLanes, savedActivities, savedFlows);
+
+        PolicyVersionResponseDTO snapshot =
+                policyVersionService.createSnapshot(policyId, savedPolicy.getBpmnXml());
+        if (snapshot != null && snapshot.getVersionNumber() != null) {
+            savedPolicy.setVersion(snapshot.getVersionNumber());
+            policyRepository.save(savedPolicy);
+        }
+
+        return buildFullResponse(savedPolicy);
+    }
+
+    private void persistChildren(BusinessPolicyRequestDTO request,
+                                 ObjectId policyId,
+                                 List<Lane> savedLanes,
+                                 List<Activity> savedActivities,
+                                 List<Flow> savedFlows) {
+        Map<String, ObjectId> laneIdByClientId = new HashMap<>();
+        for (LaneRequestDTO laneDto : request.getLanes()) {
+            Lane lane = laneMapper.toEntity(laneDto, policyId);
+            Lane saved = laneRepository.save(lane);
+            savedLanes.add(saved);
+            if (laneDto.getClientId() != null) {
+                laneIdByClientId.put(laneDto.getClientId(), saved.getId());
+            }
+        }
+
+        Map<String, ObjectId> activityIdByClientId = new HashMap<>();
+        for (ActivityRequestDTO activityDto : request.getActivities()) {
+            ObjectId laneId = laneIdByClientId.get(activityDto.getLaneRef());
+            if (laneId == null) {
+                throw new BadRequestException(
+                        "Activity '" + activityDto.getName() + "' references unknown lane: " + activityDto.getLaneRef());
+            }
+            Activity activity = activityMapper.toEntity(activityDto, policyId, laneId);
+            Activity saved = activityRepository.save(activity);
+            savedActivities.add(saved);
+            if (activityDto.getClientId() != null) {
+                activityIdByClientId.put(activityDto.getClientId(), saved.getId());
+            }
+        }
+
+        for (FlowRequestDTO flowDto : request.getFlows()) {
+            ObjectId sourceId = activityIdByClientId.get(flowDto.getSourceRef());
+            ObjectId targetId = activityIdByClientId.get(flowDto.getTargetRef());
+            if (sourceId == null) {
+                throw new BadRequestException("Flow references unknown source activity: " + flowDto.getSourceRef());
+            }
+            if (targetId == null) {
+                throw new BadRequestException("Flow references unknown target activity: " + flowDto.getTargetRef());
+            }
+            Flow flow = flowMapper.toEntity(flowDto, sourceId, targetId);
+            Flow saved = flowRepository.save(flow);
+            savedFlows.add(saved);
+        }
     }
 
     /**

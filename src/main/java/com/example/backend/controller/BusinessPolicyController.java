@@ -59,6 +59,18 @@ public class BusinessPolicyController {
     }
 
     /**
+     * Replaces the full graph (policy metadata + lanes + activities + flows)
+     * of an existing policy. Used by the visual designer's "Guardar" button
+     * when the admin is editing an existing policy (route param :id).
+     */
+    @PutMapping("/{id}/full")
+    public ResponseEntity<BusinessPolicyResponseDTO> updateFull(@PathVariable String id,
+                                                                @Valid @RequestBody BusinessPolicyRequestDTO request) {
+        BusinessPolicyResponseDTO response = businessPolicyService.updateFullPolicyStructure(id, request);
+        return ResponseEntity.ok(response);
+    }
+
+    /**
      * Save BPMN XML + structured graph in a single shot.
      *
      * Preferred entry point for the visual designer. Persists the diagram
