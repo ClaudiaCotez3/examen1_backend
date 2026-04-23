@@ -9,6 +9,17 @@ import org.springframework.data.annotation.Id;
 import org.springframework.data.mongodb.core.mapping.Document;
 import org.springframework.data.mongodb.core.mapping.Field;
 
+/**
+ * Definition-layer sequence flow. Connects two {@link Activity} nodes inside
+ * the same {@link BusinessPolicy}.
+ *
+ * Flow types:
+ *   - LINEAR       — unconditional next step.
+ *   - CONDITIONAL  — branch out of a DECISION gateway; {@link #condicion}
+ *                    carries the expression or label for the branch.
+ *   - PARALLEL     — branch out of a parallel gateway (AND split).
+ *   - LOOP         — back-edge into an earlier activity.
+ */
 @Data
 @Builder
 @NoArgsConstructor

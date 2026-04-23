@@ -82,6 +82,12 @@ public class MongoIndexInitializer {
         activityInstances.ensureIndex(new Index()
                 .on("estado", Sort.Direction.ASC)
                 .on("fecha_inicio", Sort.Direction.DESC));
+        // Pool visibility: WAITING tasks where the operator is in the eligible
+        // pool. Mongo can use a multikey compound index to serve this query
+        // without a collection scan as soon as the data set grows.
+        activityInstances.ensureIndex(new Index()
+                .on("usuarios_asignados", Sort.Direction.ASC)
+                .on("estado", Sort.Direction.ASC));
 
         // respuestas_formulario (Phase 5 — single doc per submission, JSON data map)
         IndexOperations formResponses = mongoTemplate.indexOps(FormResponse.class);

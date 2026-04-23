@@ -29,25 +29,38 @@ public class ActivityRequestDTO {
     @NotBlank(message = "Lane reference is required")
     private String laneRef;
 
-    private Boolean requiresForm;
+    /**
+     * USER | CANDIDATE_USERS | DEPARTMENT.
+     * Only meaningful for {@code type == "TASK"} — START/END/DECISION ignore it.
+     * When omitted, the service defaults to DEPARTMENT.
+     */
+    private String assignmentType;
 
     /**
-     * Schema of the dynamic form attached to the activity.
-     * Sent by the frontend after extracting it from the BPMN extension elements.
+     * Inferred on the server from the presence of {@link #formDefinition} /
+     * {@link #formId}. Kept in the DTO for back-compat; clients should not
+     * rely on it.
+     */
+    private Boolean requiresForm;
+
+    /** Catalog reference to the reusable form; null for approval tasks. */
+    private String formId;
+
+    /**
+     * Denormalized form schema. When both {@link #formId} and this field are
+     * sent, the server trusts {@link #formId} and uses this as a fallback
+     * when the referenced form cannot be resolved.
      */
     @Valid
     private FormDefinitionDTO formDefinition;
 
-    /** Single default operator. Kept for back-compat with older clients. */
+    /** Singular assignee — kept for back-compat with older clients. */
     private String assignedUserId;
 
     /**
-     * Multi-assignee variant — preferred. When both fields are present the
-     * service treats this list as authoritative and `assignedUserId` as
-     * its first element.
+     * Multi-assignee variant — preferred. Interpretation depends on
+     * {@link #assignmentType} (single-user → first id; candidates → pool;
+     * department → ignored).
      */
     private List<String> assignedUserIds;
-
-    /** Customer-supplied inputs the activity requires (free-text bullets). */
-    private List<String> requirements;
 }

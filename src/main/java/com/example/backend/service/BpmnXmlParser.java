@@ -28,60 +28,56 @@ import java.util.Set;
  * Parses BPMN 2.0 XML produced by the visual designer into the same
  * {@link BusinessPolicyRequestDTO} shape the structured save path uses.
  *
- * Why a custom DOM parser instead of `camunda-bpmn-model`?
- *   - The BPMN we deal with is a small, well-known subset (lanes, flow nodes,
- *     sequence flows, plus three custom `workflow:*` extension attributes).
- *   - Pulling in the full bpmn-model dependency adds ~3MB of jars and a
- *     transitive Camunda namespace that we have no other use for.
- *   - DOM-level access lets us read both `extensionElements` and the
- *     `$attrs`-style flat attributes that the frontend writes when the
- *     moddle layer falls back to attribute serialization.
+ * Supported subset (rest of BPMN is ignored):
+ *   bpmn:lane                → LaneRequestDTO   (Department)
+ *   bpmn:startEvent          → ActivityRequestDTO type=START
+ *   bpmn:endEvent            → ActivityRequestDTO type=END
+ *   bpmn:task                → ActivityRequestDTO type=TASK (HUMAN_TASK)
+ *   bpmn:exclusiveGateway    → ActivityRequestDTO type=DECISION
+ *   bpmn:parallelGateway     → ActivityRequestDTO type=DECISION
+ *   bpmn:sequenceFlow        → FlowRequestDTO (LINEAR or CONDITIONAL)
  *
- * Mapping rules (mirrors `bpmn-parser.ts` in the frontend):
- *   bpmn:lane                        → LaneRequestDTO
- *   bpmn:startEvent                  → ActivityRequestDTO type=START
- *   bpmn:endEvent                    → ActivityRequestDTO type=END
- *   bpmn:*Gateway                    → ActivityRequestDTO type=DECISION
- *   bpmn:task / userTask / etc.      → ActivityRequestDTO type=TASK
- *   bpmn:sequenceFlow                → FlowRequestDTO (LINEAR or CONDITIONAL)
+ * Extension attributes read off task nodes:
+ *   workflow:formId          → ActivityRequestDTO.formId (+ requiresForm=true)
+ *   workflow:assignedUserId  → ActivityRequestDTO.assignedUserIds
+ *                              (JSON array or single string)
+ *   workflow:assignmentType  → ActivityRequestDTO.assignmentType
+ *                              (USER | CANDIDATE_USERS | DEPARTMENT)
  *
- * Extension attributes read off task-like nodes:
- *   workflow:formId                  → (catalog ref; resolution is the
- *                                      caller's responsibility — parser only
- *                                      records that one was assigned)
- *   workflow:assignedUserId          → ActivityRequestDTO.assignedUserIds
- *                                      (accepts JSON array or single string)
- *   workflow:requirements            → ActivityRequestDTO.requirements
- *                                      (accepts JSON array)
+ * Requirements are <b>no longer</b> read per activity — the new schema keeps
+ * them at the process level ({@link BusinessPolicyRequestDTO#getPrerequisites()})
+ * and the frontend sends them on the `structure` payload directly, not
+ * embedded in the XML.
  */
 @Service
 public class BpmnXmlParser {
 
     private static final String NS_BPMN = "http://www.omg.org/spec/BPMN/20100524/MODEL";
 
-    /** Custom extension namespace the frontend writes under (best-effort). */
     private static final String ATTR_FORM_ID = "workflow:formId";
     private static final String ATTR_ASSIGNED_USER = "workflow:assignedUserId";
-    private static final String ATTR_REQUIREMENTS = "workflow:requirements";
+    private static final String ATTR_ASSIGNMENT_TYPE = "workflow:assignmentType";
 
-    /** BPMN local-name → activity type buckets. */
-    private static final Set<String> TASK_NODES = Set.of(
-            "task", "userTask", "serviceTask", "manualTask", "scriptTask",
-            "businessRuleTask", "sendTask", "receiveTask"
-    );
+    /** Restricted set of task-like nodes recognized as HUMAN_TASK. */
+    private static final Set<String> TASK_NODES = Set.of("task");
+
+    /** Restricted set of gateway nodes recognized as DECISION. */
     private static final Set<String> GATEWAY_NODES = Set.of(
-            "exclusiveGateway", "inclusiveGateway", "parallelGateway",
-            "eventBasedGateway", "complexGateway"
+            "exclusiveGateway", "parallelGateway"
+    );
+
+    /** Assignment types accepted from the XML / frontend payload. */
+    private static final Set<String> ASSIGNMENT_TYPES = Set.of(
+            "USER", "CANDIDATE_USERS", "DEPARTMENT"
     );
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     /**
-     * Parse XML into a structured request DTO. The returned DTO has
-     * lanes/activities/flows populated but no top-level name/description —
-     * those come from the policy metadata, not the diagram.
-     *
-     * @throws BadRequestException if the XML is malformed or empty.
+     * Parse XML into a structured request DTO. Lanes / activities / flows
+     * are populated; {@code name}, {@code description} and
+     * {@code prerequisites} come from the policy metadata and are not
+     * touched here.
      */
     public BusinessPolicyRequestDTO parse(String xml) {
         if (xml == null || xml.isBlank()) {
@@ -91,7 +87,6 @@ public class BpmnXmlParser {
         Document doc = parseDocument(xml);
 
         List<LaneRequestDTO> lanes = readLanes(doc);
-        // Build the lane lookup so we can stamp each activity with its laneRef.
         Map<String, String> elementToLane = readElementLaneMap(doc);
         List<ActivityRequestDTO> activities = readActivities(doc, elementToLane, lanes);
         List<FlowRequestDTO> flows = readFlows(doc, activities);
@@ -110,8 +105,7 @@ public class BpmnXmlParser {
         try {
             DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
             factory.setNamespaceAware(true);
-            // XXE hardening — these inputs come over HTTP from authenticated
-            // admins, but defense-in-depth is cheap.
+            // XXE hardening — cheap defense-in-depth for XML over HTTP.
             factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
             factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
             factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
@@ -125,7 +119,7 @@ public class BpmnXmlParser {
         }
     }
 
-    // ── Lanes ──────────────────────────────────────────────────────────
+    // ── Lanes (Departments) ────────────────────────────────────────────
 
     private List<LaneRequestDTO> readLanes(Document doc) {
         NodeList laneNodes = doc.getElementsByTagNameNS(NS_BPMN, "lane");
@@ -136,13 +130,11 @@ public class BpmnXmlParser {
             String name = lane.getAttribute("name");
             lanes.add(LaneRequestDTO.builder()
                     .clientId(id)
-                    .name(isBlank(name) ? "Lane " + (i + 1) : name)
+                    .name(isBlank(name) ? "Departamento " + (i + 1) : name)
                     .position(i)
                     .build());
         }
         if (lanes.isEmpty()) {
-            // Match the frontend's fallback: synthesize a default lane so
-            // standalone diagrams (no participant) still validate.
             lanes.add(LaneRequestDTO.builder()
                     .clientId("lane_default")
                     .name("Default")
@@ -189,6 +181,8 @@ public class BpmnXmlParser {
 
                 String localName = child.getLocalName();
                 String activityType = classifyActivityType(localName);
+                // Anything outside the supported subset is silently dropped —
+                // keeps legacy diagrams loadable without polluting the graph.
                 if (activityType == null) continue;
 
                 Element el = (Element) child;
@@ -196,16 +190,21 @@ public class BpmnXmlParser {
                 String name = el.getAttribute("name");
 
                 String laneRef = elementToLane.getOrDefault(id, lanes.get(0).getClientId());
-                ActivityRequestDTO activity = ActivityRequestDTO.builder()
+                ActivityRequestDTO.ActivityRequestDTOBuilder builder = ActivityRequestDTO.builder()
                         .clientId(id)
                         .name(isBlank(name) ? defaultName(activityType) : name)
                         .type(activityType)
                         .laneRef(laneRef)
-                        .requiresForm(false)
-                        .build();
+                        .requiresForm(false);
+
+                ActivityRequestDTO activity = builder.build();
 
                 if ("TASK".equals(activityType)) {
                     applyExtensionAttributes(el, activity);
+                    // Default assignmentType for tasks when the XML omits it.
+                    if (isBlank(activity.getAssignmentType())) {
+                        activity.setAssignmentType("DEPARTMENT");
+                    }
                 }
                 activities.add(activity);
             }
@@ -222,17 +221,25 @@ public class BpmnXmlParser {
     }
 
     /**
-     * Reads `workflow:*` extension attributes off a Task. The frontend
+     * Reads {@code workflow:*} extension attributes off a task. The frontend
      * writes them as either real BPMN extension elements OR plain element
-     * attributes (depending on whether moddle accepted the namespace), so
-     * we check both surfaces.
+     * attributes; we check both.
      */
     private void applyExtensionAttributes(Element el, ActivityRequestDTO activity) {
-        // Plain attribute path (frontend's $attrs fallback).
-        readAttr(el, ATTR_ASSIGNED_USER).ifPresent(raw -> activity.setAssignedUserIds(parseStringList(raw)));
-        readAttr(el, ATTR_REQUIREMENTS).ifPresent(raw -> activity.setRequirements(parseStringList(raw)));
-        // formId presence flips requiresForm; we don't resolve the catalog here.
-        readAttr(el, ATTR_FORM_ID).ifPresent(raw -> activity.setRequiresForm(true));
+        readAttr(el, ATTR_ASSIGNED_USER)
+                .ifPresent(raw -> activity.setAssignedUserIds(parseStringList(raw)));
+
+        readAttr(el, ATTR_ASSIGNMENT_TYPE).ifPresent(raw -> {
+            String normalized = raw.trim();
+            if (ASSIGNMENT_TYPES.contains(normalized)) {
+                activity.setAssignmentType(normalized);
+            }
+        });
+
+        readAttr(el, ATTR_FORM_ID).ifPresent(raw -> {
+            activity.setFormId(raw.trim());
+            activity.setRequiresForm(true);
+        });
     }
 
     // ── Flows ──────────────────────────────────────────────────────────
@@ -251,11 +258,15 @@ public class BpmnXmlParser {
             String target = flow.getAttribute("targetRef");
             if (isBlank(source) || isBlank(target)) continue;
 
-            // CONDITIONAL when an explicit conditionExpression is present, OR
-            // when the source is a gateway (decision branches are inherently
-            // conditional). LINEAR otherwise.
-            boolean hasCondition = flow.getElementsByTagNameNS(NS_BPMN, "conditionExpression").getLength() > 0;
-            String type = (hasCondition || "DECISION".equals(typeByClientId.get(source)))
+            // Skip flows whose endpoints aren't in the supported subset — they
+            // would produce dangling references in the backend graph.
+            String sourceType = typeByClientId.get(source);
+            String targetType = typeByClientId.get(target);
+            if (sourceType == null || targetType == null) continue;
+
+            boolean hasCondition =
+                    flow.getElementsByTagNameNS(NS_BPMN, "conditionExpression").getLength() > 0;
+            String type = (hasCondition || "DECISION".equals(sourceType))
                     ? "CONDITIONAL"
                     : "LINEAR";
 
@@ -271,18 +282,15 @@ public class BpmnXmlParser {
     // ── Helpers ────────────────────────────────────────────────────────
 
     /**
-     * Reads an attribute either by the namespaced QName (when the moddle
-     * recognized our namespace) or by the literal `workflow:foo` local
-     * name (when it fell back to attribute serialization).
+     * Reads an attribute either by the literal namespaced name
+     * ("workflow:foo") or by its local name. The frontend uses both shapes
+     * depending on whether moddle accepted our namespace.
      */
     private java.util.Optional<String> readAttr(Element el, String nsPrefixedName) {
-        // Try literal "workflow:foo" first — this is what the frontend's
-        // $attrs fallback writes most of the time.
         String literal = el.getAttribute(nsPrefixedName);
         if (literal != null && !literal.isBlank()) {
             return java.util.Optional.of(literal);
         }
-        // Then try the local-name lookup (in case moddle stripped the prefix).
         int colon = nsPrefixedName.indexOf(':');
         if (colon > 0) {
             String local = nsPrefixedName.substring(colon + 1);
@@ -295,9 +303,8 @@ public class BpmnXmlParser {
     }
 
     /**
-     * The frontend stores list-typed extensions as JSON-encoded strings.
-     * Tolerate both array form (`["a","b"]`) and a bare string (legacy
-     * single-value writes).
+     * Parses a list-typed extension written as either a JSON array
+     * ({@code ["a","b"]}) or a bare single value.
      */
     private List<String> parseStringList(String raw) {
         String trimmed = raw.trim();
@@ -319,10 +326,10 @@ public class BpmnXmlParser {
 
     private String defaultName(String activityType) {
         return switch (activityType) {
-            case "START" -> "Start";
-            case "END" -> "End";
-            case "DECISION" -> "Decision";
-            default -> "Activity";
+            case "START" -> "Inicio";
+            case "END" -> "Fin";
+            case "DECISION" -> "Decisión";
+            default -> "Actividad";
         };
     }
 

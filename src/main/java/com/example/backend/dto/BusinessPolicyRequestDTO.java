@@ -24,11 +24,17 @@ public class BusinessPolicyRequestDTO {
     private String status;
 
     /**
-     * Raw BPMN 2.0 XML as exported by the visual designer. Sent with
-     * full-save calls so the diagram (with geometry + extension elements)
-     * round-trips. Optional for plain create/update.
+     * Raw BPMN 2.0 XML as exported by the visual designer.
      */
     private String bpmnXml;
+
+    /**
+     * Process-level prerequisites — inputs the customer must provide
+     * <b>before</b> the process can be initiated. Validated at runtime when
+     * a new Procedure is about to be created for this policy. Plain strings
+     * so the UI can keep rendering them as a simple bullet list.
+     */
+    private List<String> prerequisites;
 
     /** Used only by saveFullPolicyStructure — left null for plain create/update. */
     @Valid

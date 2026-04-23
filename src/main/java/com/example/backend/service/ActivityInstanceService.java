@@ -24,29 +24,32 @@ public class ActivityInstanceService {
     private final ActivityRepository activityRepository;
     private final ActivityInstanceMapper activityInstanceMapper;
 
-    /** Returns all activity instances assigned to a user (WAITING or IN_PROGRESS). */
+    /**
+     * All instances claimed by a user that are still actionable
+     * (WAITING/IN_PROGRESS). Used by monitoring tools and tests.
+     * WAITING instances here are by-definition already-claimed (since
+     * claimedBy=userId), not pool-visible ones — the pool view lives in
+     * {@link OperatorService#getOperatorTasks}.
+     */
     public List<ActivityInstanceResponseDTO> getActivitiesByUser(String userId) {
         ObjectId userObjectId = parseObjectId(userId, "userId");
         List<ActivityInstance> instances = activityInstanceRepository
-                .findByAsignadoAAndEstadoIn(userObjectId, List.of("en_espera", "en_proceso"));
+                .findClaimedByAndStatusIn(userObjectId, List.of("en_espera", "en_proceso"));
         return enrichAndMap(instances);
     }
 
-    /** Returns all activity instances with a given status. */
     public List<ActivityInstanceResponseDTO> getActivitiesByStatus(String status) {
         String estado = mapStatus(status);
         List<ActivityInstance> instances = activityInstanceRepository.findByEstado(estado);
         return enrichAndMap(instances);
     }
 
-    /** Returns all activity instances for a given case file. */
     public List<ActivityInstanceResponseDTO> getActivitiesByCaseFile(String caseFileId) {
         ObjectId caseFileObjectId = parseObjectId(caseFileId, "caseFileId");
         List<ActivityInstance> instances = activityInstanceRepository.findByTramiteId(caseFileObjectId);
         return enrichAndMap(instances);
     }
 
-    /** Enriches activity instances with activity name/type and maps to DTOs. */
     private List<ActivityInstanceResponseDTO> enrichAndMap(List<ActivityInstance> instances) {
         List<ObjectId> activityIds = instances.stream()
                 .map(ActivityInstance::getActividadId)

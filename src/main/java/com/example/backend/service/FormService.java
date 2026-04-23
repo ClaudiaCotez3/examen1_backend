@@ -251,9 +251,9 @@ public class FormService {
             return; // privileged roles can submit on behalf of operators
         }
         ObjectId callerId = parseObjectId(caller.getId(), "userId");
-        if (instance.getAsignadoA() == null || !instance.getAsignadoA().equals(callerId)) {
+        if (instance.getClaimedBy() == null || !instance.getClaimedBy().equals(callerId)) {
             throw new BadRequestException(
-                    "Only the assigned operator can submit this form");
+                    "Only the operator who claimed this task can submit its form");
         }
     }
 

@@ -30,6 +30,7 @@ import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -37,10 +38,18 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
- * Core workflow engine responsible for:
- * - Starting processes (creating case files from a policy version)
- * - Advancing activities through the workflow (start / complete)
- * - Evaluating outgoing flows and creating next activity instances
+ * Core workflow engine.
+ *
+ * Responsibilities:
+ *   - starting processes (creating case files from a policy version)
+ *   - claiming a WAITING task atomically ({@link #startActivity})
+ *   - completing a task (only the claimer may complete)
+ *   - creating the next ActivityInstance(s) based on outgoing flows
+ *
+ * Assignment model (matches {@link ActivityInstance} javadoc):
+ *   Each instance carries an eligible pool ({@code assignedUserIds}) copied
+ *   from the Activity definition at creation time. {@code claimedBy} is null
+ *   while the task is pool-visible and set atomically when someone takes it.
  */
 @Slf4j
 @Service
@@ -74,13 +83,12 @@ public class WorkflowEngineService {
 
     /**
      * Creates a new case file (process instance) from a policy version.
-     * Finds the START activity, creates the first ActivityInstance in WAITING state,
-     * and records the event in process history.
+     * Finds the START activity, creates the first ActivityInstance in WAITING
+     * state (with its eligible pool) and records the event in process history.
      */
     public CaseFileResponseDTO startProcess(String policyVersionId) {
         ObjectId versionObjectId = parseObjectId(policyVersionId, "policyVersionId");
 
-        // Load and validate policy version
         PolicyVersion version = policyVersionRepository.findById(versionObjectId)
                 .orElseThrow(() -> new ResourceNotFoundException("PolicyVersion", policyVersionId));
 
@@ -88,7 +96,6 @@ public class WorkflowEngineService {
             throw new BadRequestException("Cannot start process: policy version is not ACTIVE");
         }
 
-        // Find START activity for this policy
         List<Activity> startActivities = activityRepository
                 .findByPoliticaIdAndTipo(version.getPoliticaId(), "START");
 
@@ -97,7 +104,6 @@ public class WorkflowEngineService {
         }
         Activity startActivity = startActivities.get(0);
 
-        // Create case file (Procedure / tramite)
         LocalDateTime now = LocalDateTime.now();
         Procedure caseFile = Procedure.builder()
                 .codigo(generateCaseCode())
@@ -107,42 +113,103 @@ public class WorkflowEngineService {
                 .build();
         Procedure savedCaseFile = procedureRepository.save(caseFile);
 
-        // Create first activity instance in WAITING state
-        ActivityInstance firstInstance = ActivityInstance.builder()
-                .tramiteId(savedCaseFile.getId())
-                .actividadId(startActivity.getId())
-                .estado(ACTIVITY_WAITING)
-                .build();
+        ActivityInstance firstInstance = buildInstance(savedCaseFile.getId(), startActivity, now);
         ActivityInstance savedInstance = activityInstanceRepository.save(firstInstance);
 
-        // Record history
         saveHistory(savedCaseFile.getId(), startActivity.getId(), null, ACTION_STARTED, now);
 
         log.info("Process started: caseFile={}, policy={}, startActivity={}",
                 savedCaseFile.getId(), version.getPoliticaId(), startActivity.getId());
 
-        // Build response
         CaseFileResponseDTO response = caseFileMapper.toResponse(savedCaseFile);
         response.setCurrentActivities(List.of(
                 activityInstanceMapper.toResponse(savedInstance, startActivity)));
         return response;
     }
 
-    // ── Start Activity ─────────────────────────────────────────────────────
+    // ── Take / Start Task (atomic claim) ───────────────────────────────────
 
     /**
-     * Transitions an activity instance from WAITING to IN_PROGRESS atomically.
+     * Claims a WAITING task for a user atomically. Implements the "Tomar"
+     * action in the Kanban.
      *
-     * Uses findAndModify with a conditional filter (estado = en_espera) so that only ONE
-     * caller can win the transition — if two operators click "Start" simultaneously,
-     * the second call receives null and we throw a clear 400 error.
+     * Preconditions (enforced at the DB level via find-and-modify):
+     *   1. instance exists
+     *   2. {@code status == WAITING}
+     *   3. {@code claimedBy == null}
+     *   4. {@code userId} appears in {@code assignedUserIds}
      *
-     * When a userId is provided, the user is assigned in the same atomic operation
-     * (satisfies Phase 4 task: "Assign automatically when user clicks Start").
+     * Successful transition:
+     *   - {@code claimedBy = userId}
+     *   - {@code status = IN_PROGRESS}
+     *   - {@code startedAt = now}
+     *
+     * If the user is not in the eligible pool, or the task is already
+     * claimed / not WAITING, throws {@link BadRequestException} — the
+     * caller should refresh the Kanban.
      */
     public ActivityInstanceResponseDTO startActivity(String activityInstanceId, String userId) {
         ObjectId instanceObjectId = parseObjectId(activityInstanceId, "activityInstanceId");
-        ObjectId userObjectId = userId != null ? parseObjectId(userId, "userId") : null;
+        if (userId == null || userId.isBlank()) {
+            // Downgrade gracefully: auto-advance paths (START / END / DECISION)
+            // still call startActivity without a user id; those cases go
+            // through the legacy transition below.
+            return autoAdvance(instanceObjectId);
+        }
+        ObjectId userObjectId = parseObjectId(userId, "userId");
+        LocalDateTime now = LocalDateTime.now();
+
+        // Atomic claim: WAITING + not yet claimed + user is in the pool.
+        Query filter = new Query(Criteria.where("_id").is(instanceObjectId)
+                .and("estado").is(ACTIVITY_WAITING)
+                .and("usuarios_asignados").is(userObjectId)
+                .orOperator(
+                        Criteria.where("asignado_a").is(null),
+                        Criteria.where("asignado_a").exists(false)
+                ));
+        Update update = new Update()
+                .set("estado", ACTIVITY_IN_PROGRESS)
+                .set("fecha_inicio", now)
+                .set("asignado_a", userObjectId);
+
+        ActivityInstance updated = mongoTemplate.findAndModify(
+                filter, update,
+                FindAndModifyOptions.options().returnNew(true),
+                ActivityInstance.class
+        );
+
+        if (updated == null) {
+            // Work out *why* the claim failed so the operator gets a clear
+            // message (not just "400 Bad Request"). This read is off the
+            // hot path — it only runs on a conflict.
+            ActivityInstance existing = mongoTemplate.findById(instanceObjectId, ActivityInstance.class);
+            if (existing == null) {
+                throw new ResourceNotFoundException("ActivityInstance", activityInstanceId);
+            }
+            if (!ACTIVITY_WAITING.equals(existing.getEstado())) {
+                throw new BadRequestException(
+                        "Cannot take task: current status is '" + existing.getEstado()
+                                + "'. Only WAITING tasks can be taken.");
+            }
+            if (existing.getClaimedBy() != null) {
+                throw new BadRequestException("Task was already taken by another operator");
+            }
+            // Not WAITING-vs-claimed → must be the pool check that failed.
+            throw new BadRequestException("You are not eligible to take this task");
+        }
+
+        saveHistory(updated.getTramiteId(), updated.getActividadId(), userObjectId, ACTION_STARTED, now);
+        log.info("Task {} claimed by user {}", activityInstanceId, userId);
+
+        Activity activity = activityRepository.findById(updated.getActividadId()).orElse(null);
+        return activityInstanceMapper.toResponse(updated, activity);
+    }
+
+    /**
+     * Transition WAITING → IN_PROGRESS without claiming — used for automated
+     * nodes (START / DECISION auto-advance). Never called from the Kanban.
+     */
+    private ActivityInstanceResponseDTO autoAdvance(ObjectId instanceObjectId) {
         LocalDateTime now = LocalDateTime.now();
 
         Query filter = new Query(Criteria.where("_id").is(instanceObjectId)
@@ -150,90 +217,90 @@ public class WorkflowEngineService {
         Update update = new Update()
                 .set("estado", ACTIVITY_IN_PROGRESS)
                 .set("fecha_inicio", now);
-        if (userObjectId != null) {
-            update.set("asignado_a", userObjectId);
-        }
 
         ActivityInstance updated = mongoTemplate.findAndModify(
-                filter,
-                update,
+                filter, update,
                 FindAndModifyOptions.options().returnNew(true),
                 ActivityInstance.class
         );
 
         if (updated == null) {
-            // Either the instance does not exist or it is no longer WAITING
             ActivityInstance existing = mongoTemplate.findById(instanceObjectId, ActivityInstance.class);
             if (existing == null) {
-                throw new ResourceNotFoundException("ActivityInstance", activityInstanceId);
+                throw new ResourceNotFoundException("ActivityInstance", instanceObjectId.toHexString());
             }
             throw new BadRequestException(
                     "Cannot start activity: current status is '" + existing.getEstado()
                             + "'. Only WAITING activities can be started.");
         }
 
-        saveHistory(updated.getTramiteId(), updated.getActividadId(), userObjectId, ACTION_STARTED, now);
+        saveHistory(updated.getTramiteId(), updated.getActividadId(), null, ACTION_STARTED, now);
 
         Activity activity = activityRepository.findById(updated.getActividadId()).orElse(null);
         return activityInstanceMapper.toResponse(updated, activity);
     }
 
-    // ── Complete Activity (Core Workflow Logic) ────────────────────────────
+    // ── Complete Activity ──────────────────────────────────────────────────
 
     /**
      * Completes an activity instance and advances the workflow.
-     * Evaluates outgoing flows and creates next activity instance(s) based on flow type:
-     * - LINEAR: creates one next activity instance
-     * - CONDITIONAL: evaluates condition (mocked for now), picks one path
-     * - PARALLEL: creates multiple activity instances simultaneously
-     * - LOOP: returns to a previous activity
      *
-     * If the next activity is an END node, the case file is marked as COMPLETED.
+     * Ownership rule: only the operator in {@link ActivityInstance#getClaimedBy()}
+     * may complete. A caller that hasn't claimed the task gets a 400.
+     *
+     * Form rule: if the activity declares a form, a response must exist
+     * before the task can be completed.
      */
     public CaseFileResponseDTO completeActivity(String activityInstanceId, String userId) {
         ActivityInstance instance = findInstanceOrThrow(activityInstanceId);
 
-        // State validation: only IN_PROGRESS activities can be completed
+        // State machine — only IN_PROGRESS can transition to COMPLETED.
         if (!ACTIVITY_IN_PROGRESS.equals(instance.getEstado())) {
             throw new BadRequestException(
-                    "Cannot complete activity: current status is '" + instance.getEstado()
-                            + "'. Only IN_PROGRESS activities can be completed.");
+                    "Cannot complete task: current status is '" + instance.getEstado()
+                            + "'. Only IN_PROGRESS tasks can be completed.");
         }
 
-        // Phase 5 — gate completion on the form when the activity declares one.
-        // Loaded eagerly because the activity is also needed below; reusing the
-        // same lookup avoids a second round-trip for the form check.
+        // Ownership — only the claimer can complete. Internal callers (the
+        // engine auto-completing END nodes) pass userId=null and are allowed.
+        ObjectId userObjectId = (userId != null && !userId.isBlank())
+                ? parseObjectId(userId, "userId")
+                : null;
+        if (userObjectId != null) {
+            if (instance.getClaimedBy() == null) {
+                throw new BadRequestException("Cannot complete task: it has not been claimed yet");
+            }
+            if (!instance.getClaimedBy().equals(userObjectId)) {
+                throw new BadRequestException("Only the operator who claimed this task can complete it");
+            }
+        }
+
+        // Load the definition once — reused for form check + optional END check.
         Activity activityDef = activityRepository.findById(instance.getActividadId())
                 .orElseThrow(() -> new ResourceNotFoundException("Activity",
                         instance.getActividadId().toHexString()));
+
+        // Form gate: required forms must be submitted before completion.
         if (Boolean.TRUE.equals(activityDef.getRequiereFormulario())
                 && !formService.hasResponse(instance.getId())) {
             throw new BadRequestException(
-                    "Cannot complete activity: form must be submitted before completion");
+                    "Cannot complete task: form must be submitted before completion");
         }
 
         LocalDateTime now = LocalDateTime.now();
-        ObjectId userObjectId = userId != null ? parseObjectId(userId, "userId") : null;
-
-        // Mark current activity as completed
         instance.setEstado(ACTIVITY_COMPLETED);
         instance.setFechaFin(now);
         activityInstanceRepository.save(instance);
 
-        // Record completion in history
         saveHistory(instance.getTramiteId(), instance.getActividadId(), userObjectId, ACTION_COMPLETED, now);
 
-        // Find outgoing flows from the completed activity
+        // Follow outgoing flows and create the next instance(s).
         List<Flow> outgoingFlows = flowRepository.findByActividadOrigenId(instance.getActividadId());
-
-        // Create next activity instances based on flow evaluation
-        List<ActivityInstance> nextInstances = new ArrayList<>();
         Procedure caseFile = procedureRepository.findById(instance.getTramiteId())
                 .orElseThrow(() -> new ResourceNotFoundException("CaseFile",
                         instance.getTramiteId().toHexString()));
 
         if (outgoingFlows.isEmpty()) {
-            // No outgoing flows: check if process should complete
             checkAndCompleteProcess(caseFile, now);
         } else {
             List<Flow> flowsToFollow = evaluateFlows(outgoingFlows);
@@ -243,23 +310,17 @@ public class WorkflowEngineService {
                         .orElseThrow(() -> new ResourceNotFoundException("Activity",
                                 flow.getActividadDestinoId().toHexString()));
 
-                // Create next activity instance
-                ActivityInstance nextInstance = ActivityInstance.builder()
-                        .tramiteId(caseFile.getId())
-                        .actividadId(nextActivity.getId())
-                        .estado(ACTIVITY_WAITING)
-                        .build();
+                ActivityInstance nextInstance = buildInstance(caseFile.getId(), nextActivity, now);
                 ActivityInstance savedNext = activityInstanceRepository.save(nextInstance);
-                nextInstances.add(savedNext);
 
-                // Record transition in history
                 saveHistory(caseFile.getId(), nextActivity.getId(), userObjectId, ACTION_TRANSITION, now);
 
                 log.info("Workflow transition: caseFile={}, from={}, to={}, flowType={}",
                         caseFile.getId(), instance.getActividadId(),
                         nextActivity.getId(), flow.getTipo());
 
-                // If the next activity is END, auto-complete it and finish the process
+                // Auto-complete END nodes so the process wraps up without
+                // requiring an operator interaction.
                 if ("END".equals(nextActivity.getTipo())) {
                     savedNext.setEstado(ACTIVITY_COMPLETED);
                     savedNext.setFechaInicio(now);
@@ -272,10 +333,8 @@ public class WorkflowEngineService {
             }
         }
 
-        // Reload case file (status may have changed)
         caseFile = procedureRepository.findById(caseFile.getId()).orElse(caseFile);
 
-        // Build response with current active activities
         CaseFileResponseDTO response = caseFileMapper.toResponse(caseFile);
         List<ActivityInstance> activeInstances = activityInstanceRepository
                 .findByTramiteId(caseFile.getId()).stream()
@@ -296,42 +355,66 @@ public class WorkflowEngineService {
         return response;
     }
 
-    // ── Flow Evaluation ────────────────────────────────────────────────────
+    // ── Instance construction (shared by startProcess + completeActivity) ──
 
     /**
-     * Evaluates outgoing flows to determine which paths to follow.
-     * - LINEAR: follow the single path
-     * - CONDITIONAL: evaluate condition (mocked — follows first flow with condition, or default)
-     * - PARALLEL: follow ALL outgoing paths simultaneously
-     * - LOOP: follow back to previous activity
+     * Builds a new WAITING instance for the given activity, copying its
+     * eligible pool from the definition. Kept in one place so both the
+     * initial instance and all transition-created ones stay consistent.
      */
+    private ActivityInstance buildInstance(ObjectId caseFileId, Activity activity, LocalDateTime now) {
+        List<ObjectId> pool = resolvePool(activity);
+        return ActivityInstance.builder()
+                .tramiteId(caseFileId)
+                .actividadId(activity.getId())
+                .estado(ACTIVITY_WAITING)
+                .assignedUserIds(pool)
+                .claimedBy(null)
+                .createdAt(now)
+                .build();
+    }
+
+    /**
+     * Parses the definition's {@code assignedUserIds} (persisted as hex
+     * strings for ease of editing in the designer) into a list of
+     * {@link ObjectId}. Malformed ids are dropped silently — they would
+     * simply be un-claimable and surface as "empty pool" in validation.
+     */
+    private List<ObjectId> resolvePool(Activity activity) {
+        List<String> raw = activity.getAssignedUserIds();
+        if (raw == null || raw.isEmpty()) return Collections.emptyList();
+        List<ObjectId> out = new ArrayList<>(raw.size());
+        for (String s : raw) {
+            if (s != null && ObjectId.isValid(s)) {
+                out.add(new ObjectId(s));
+            }
+        }
+        return out;
+    }
+
+    // ── Flow Evaluation ────────────────────────────────────────────────────
+
     private List<Flow> evaluateFlows(List<Flow> outgoingFlows) {
         if (outgoingFlows.size() == 1) {
             return outgoingFlows;
         }
 
-        // Check if any flow is PARALLEL — if so, follow all paths
         boolean hasParallel = outgoingFlows.stream()
                 .anyMatch(f -> "PARALLEL".equals(f.getTipo()));
         if (hasParallel) {
             return outgoingFlows;
         }
 
-        // For CONDITIONAL flows: evaluate conditions
-        // Mock implementation: pick the first flow with a non-null condition,
-        // or fall back to the first flow without a condition (default path)
         List<Flow> conditionalFlows = outgoingFlows.stream()
                 .filter(f -> "CONDITIONAL".equals(f.getTipo()))
                 .toList();
 
         if (!conditionalFlows.isEmpty()) {
-            // Try to find a flow whose condition evaluates to true (mocked)
             for (Flow flow : conditionalFlows) {
                 if (flow.getCondicion() != null && evaluateCondition(flow.getCondicion())) {
                     return List.of(flow);
                 }
             }
-            // No condition matched: take the default path (flow without condition)
             Flow defaultFlow = conditionalFlows.stream()
                     .filter(f -> f.getCondicion() == null || f.getCondicion().isBlank())
                     .findFirst()
@@ -339,7 +422,6 @@ public class WorkflowEngineService {
             return List.of(defaultFlow);
         }
 
-        // For LOOP flows: follow back to previous activity
         List<Flow> loopFlows = outgoingFlows.stream()
                 .filter(f -> "LOOP".equals(f.getTipo()))
                 .toList();
@@ -347,29 +429,14 @@ public class WorkflowEngineService {
             return loopFlows;
         }
 
-        // Default: follow all LINEAR flows
         return outgoingFlows;
     }
 
-    /**
-     * Mock condition evaluator.
-     * In a real implementation, this would parse and evaluate expressions
-     * against form data or case file variables.
-     * For now, always returns true.
-     */
     private boolean evaluateCondition(String condition) {
-        // TODO: Implement real condition evaluation logic
-        // Could parse expressions like "amount > 1000" against case file data
         log.debug("Evaluating condition (mocked): {}", condition);
         return true;
     }
 
-    // ── Process Completion Check ───────────────────────────────────────────
-
-    /**
-     * Checks if all activity instances for a case file are completed.
-     * If so, marks the case file as COMPLETED.
-     */
     private void checkAndCompleteProcess(Procedure caseFile, LocalDateTime now) {
         List<ActivityInstance> pendingInstances = activityInstanceRepository
                 .findByTramiteId(caseFile.getId()).stream()
@@ -384,8 +451,6 @@ public class WorkflowEngineService {
         }
     }
 
-    // ── History ────────────────────────────────────────────────────────────
-
     private void saveHistory(ObjectId caseFileId, ObjectId activityId,
                              ObjectId userId, String action, LocalDateTime timestamp) {
         ProcedureHistory history = ProcedureHistory.builder()
@@ -397,8 +462,6 @@ public class WorkflowEngineService {
                 .build();
         procedureHistoryRepository.save(history);
     }
-
-    // ── Helpers ────────────────────────────────────────────────────────────
 
     private ActivityInstance findInstanceOrThrow(String activityInstanceId) {
         ObjectId objectId = parseObjectId(activityInstanceId, "activityInstanceId");

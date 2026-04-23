@@ -11,6 +11,16 @@ import org.springframework.data.mongodb.core.mapping.Field;
 
 import java.util.List;
 
+/**
+ * Definition-layer activity node. Types:
+ *   - START    — single start event
+ *   - TASK     — HUMAN_TASK (optionally FORM-backed, otherwise APPROVAL)
+ *   - DECISION — exclusive / parallel gateway
+ *   - END      — single end event
+ *
+ * Runtime state (claim, completion, assignee) lives in
+ * {@link ActivityInstance}; this entity is purely the design-time template.
+ */
 @Data
 @Builder
 @NoArgsConstructor
@@ -24,6 +34,7 @@ public class Activity {
     @Field("politica_id")
     private ObjectId politicaId;
 
+    /** Lane / Department this activity belongs to. */
     @Field("calle_id")
     private ObjectId calleId;
 
@@ -32,40 +43,43 @@ public class Activity {
     /** START | TASK | DECISION | END */
     private String tipo;
 
+    /**
+     * How the workflow engine should assign this task at runtime.
+     *   - USER             → exactly one operator from {@link #assignedUserIds}.
+     *   - CANDIDATE_USERS  → pool of operators; any member can pick it up.
+     *   - DEPARTMENT       → any operator in the owning department is eligible.
+     * Only meaningful for {@code tipo == TASK}; ignored for START/END/DECISION.
+     */
+    @Field("tipo_asignacion")
+    private String assignmentType;
+
     @Field("requiere_formulario")
     private Boolean requiereFormulario;
 
     /**
-     * Embedded JSON-shaped form schema.
-     *
-     * Stored as a sub-document (not a separate collection) because:
-     *   1) It is always read together with the activity — there is no use case
-     *      for fetching the form without its activity.
-     *   2) The shape is intentionally open: BPMN extensions can introduce new
-     *      field types without an entity migration. A polymorphic JSON body
-     *      removes the need for a fixed relational schema and avoids alter-table
-     *      style changes whenever the modeller adds a new control.
-     *   3) MongoDB documents handle this natively, so we get strong typing for
-     *      the well-known properties (name, type, required) while still allowing
-     *      the modeller to attach arbitrary metadata via {@link FormFieldDefinition}.
+     * Catalog reference to a {@link Form} in the reusable form library. Only
+     * set when the activity is form-backed (FORM_TASK); null for approval
+     * tasks. Kept alongside {@link #formDefinition} so reads don't require a
+     * join but authoring edits to the catalog still propagate on next save.
+     */
+    @Field("formulario_id")
+    private ObjectId formId;
+
+    /**
+     * Embedded JSON-shaped form schema. Duplicated from the catalog at save
+     * time so a runtime read is a single document; the {@link #formId}
+     * points back to the canonical entry.
      */
     @Field("definicion_formulario")
     private FormDefinition formDefinition;
 
     /**
      * Operators (User ids) authorized to pick up this activity at runtime.
-     * Stored as an array so multiple users / a team can share the same
-     * activity (real-world workflows rarely have a single eligible
-     * assignee). Empty / null means "any operator".
+     * Semantics depend on {@link #assignmentType}:
+     *   - USER → single id, strict ownership.
+     *   - CANDIDATE_USERS → pool of eligible operators.
+     *   - DEPARTMENT → ignored (lane membership governs eligibility).
      */
     @Field("usuarios_asignados")
     private List<String> assignedUserIds;
-
-    /**
-     * Customer-supplied inputs the activity needs (e.g. "Documento de
-     * identidad", "Factura de luz"). Modeled as plain strings — a richer
-     * shape can come later if the UI needs typed requirements.
-     */
-    @Field("requerimientos")
-    private List<String> requirements;
 }

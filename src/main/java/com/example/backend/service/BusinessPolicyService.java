@@ -48,6 +48,7 @@ public class BusinessPolicyService {
 
     private static final Set<String> ACTIVITY_TYPES = Set.of("START", "TASK", "DECISION", "END");
     private static final Set<String> FLOW_TYPES = Set.of("LINEAR", "CONDITIONAL", "PARALLEL", "LOOP");
+    private static final Set<String> ASSIGNMENT_TYPES = Set.of("USER", "CANDIDATE_USERS", "DEPARTMENT");
 
     private final BusinessPolicyRepository policyRepository;
     private final LaneRepository laneRepository;
@@ -66,6 +67,7 @@ public class BusinessPolicyService {
         BusinessPolicy entity = policyMapper.toEntity(request);
         LocalDateTime now = LocalDateTime.now();
         entity.setEstado(resolveStatusOrDefault(request.getStatus()));
+        entity.setVersion(1);
         entity.setFechaCreacion(now);
         entity.setFechaActualizacion(now);
         BusinessPolicy saved = policyRepository.save(entity);
@@ -117,6 +119,7 @@ public class BusinessPolicyService {
         BusinessPolicy policy = policyMapper.toEntity(request);
         LocalDateTime now = LocalDateTime.now();
         policy.setEstado(resolveStatusOrDefault(request.getStatus()));
+        policy.setVersion(1);
         policy.setFechaCreacion(now);
         policy.setFechaActualizacion(now);
         BusinessPolicy savedPolicy = policyRepository.save(policy);
@@ -173,8 +176,15 @@ public class BusinessPolicyService {
         }
 
         // Mint a snapshot AFTER the structural save succeeds so failed
-        // attempts don't leave phantom version records lying around.
-        policyVersionService.createSnapshot(savedPolicy.getId(), savedPolicy.getBpmnXml());
+        // attempts don't leave phantom version records. Bump policy.version
+        // to mirror the new snapshot number, so clients can read the active
+        // version without querying the versions collection.
+        PolicyVersionResponseDTO snapshot =
+                policyVersionService.createSnapshot(savedPolicy.getId(), savedPolicy.getBpmnXml());
+        if (snapshot != null && snapshot.getVersionNumber() != null) {
+            savedPolicy.setVersion(snapshot.getVersionNumber());
+            policyRepository.save(savedPolicy);
+        }
 
         return buildFullResponse(savedPolicy);
     }
@@ -196,9 +206,8 @@ public class BusinessPolicyService {
         if (structure == null) {
             structure = bpmnXmlParser.parse(request.getBpmnXml());
         }
-        // Always overwrite the XML with what the caller actually sent — the
-        // parser-derived structure may not contain it, and the XML is the
-        // authoritative diagram representation.
+        // The XML is the authoritative diagram representation — always
+        // overwrite whatever the structure claimed with what the caller sent.
         structure.setBpmnXml(request.getBpmnXml());
 
         BusinessPolicyResponseDTO saved = saveFullPolicyStructure(structure);
@@ -253,7 +262,7 @@ public class BusinessPolicyService {
         List<FlowRequestDTO> flows = request.getFlows();
 
         if (lanes == null || lanes.isEmpty()) {
-            throw new BadRequestException("Policy must contain at least one lane");
+            throw new BadRequestException("Policy must contain at least one department (lane)");
         }
         if (activities == null || activities.isEmpty()) {
             throw new BadRequestException("Policy must contain at least one activity");
@@ -265,10 +274,10 @@ public class BusinessPolicyService {
         Set<String> laneClientIds = new HashSet<>();
         for (LaneRequestDTO lane : lanes) {
             if (lane.getClientId() == null || lane.getClientId().isBlank()) {
-                throw new BadRequestException("Each lane must declare a clientId for full-policy save");
+                throw new BadRequestException("Each department must declare a clientId for full-policy save");
             }
             if (!laneClientIds.add(lane.getClientId())) {
-                throw new BadRequestException("Duplicate lane clientId: " + lane.getClientId());
+                throw new BadRequestException("Duplicate department clientId: " + lane.getClientId());
             }
         }
 
@@ -288,7 +297,17 @@ public class BusinessPolicyService {
             }
             if (!laneClientIds.contains(activity.getLaneRef())) {
                 throw new BadRequestException(
-                        "Activity '" + activity.getName() + "' references unknown lane: " + activity.getLaneRef());
+                        "Activity '" + activity.getName() + "' references unknown department: " + activity.getLaneRef());
+            }
+            // Only TASK activities carry an assignment type; validate when one was sent.
+            if ("TASK".equals(activity.getType())
+                    && activity.getAssignmentType() != null
+                    && !activity.getAssignmentType().isBlank()
+                    && !ASSIGNMENT_TYPES.contains(activity.getAssignmentType())) {
+                throw new BadRequestException(
+                        "Invalid assignmentType '" + activity.getAssignmentType()
+                                + "' for activity '" + activity.getName()
+                                + "'. Allowed: " + ASSIGNMENT_TYPES);
             }
             if ("START".equals(activity.getType())) {
                 startCount++;
