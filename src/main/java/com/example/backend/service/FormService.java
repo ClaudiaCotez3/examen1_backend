@@ -1,7 +1,6 @@
 package com.example.backend.service;
 
 import com.example.backend.dto.ActivityFormDTO;
-import com.example.backend.dto.FormDefinitionDTO;
 import com.example.backend.dto.FormResponseDTO;
 import com.example.backend.exception.BadRequestException;
 import com.example.backend.exception.ResourceNotFoundException;
@@ -100,7 +99,7 @@ public class FormService {
         }
 
         assertCallerIsAssignee(instance, caller);
-        validateAgainstSchema(definition, formData);
+        validateFormData(definition, formData);
 
         if (formResponseRepository.existsByInstanciaActividadId(instance.getId())) {
             throw new BadRequestException(
@@ -146,8 +145,11 @@ public class FormService {
      * submissions (TASK 4). Rejects on the first violation and returns a
      * descriptive {@link BadRequestException} so the UI can highlight the
      * offending field.
+     *
+     * Exposed as public so the workflow engine can reuse it to validate the
+     * policy-level start form when a case is opened.
      */
-    private void validateAgainstSchema(FormDefinition definition, Map<String, Object> formData) {
+    public void validateFormData(FormDefinition definition, Map<String, Object> formData) {
         List<String> errors = new ArrayList<>();
 
         Set<String> known = new java.util.HashSet<>();
@@ -282,11 +284,5 @@ public class FormService {
             throw new BadRequestException("Invalid " + field + ": " + value);
         }
         return new ObjectId(value);
-    }
-
-    /** Convenience overload used by services that already hold a typed schema. */
-    @SuppressWarnings("unused")
-    private FormDefinition fromDto(FormDefinitionDTO dto) {
-        return formMapper.toEntity(dto);
     }
 }

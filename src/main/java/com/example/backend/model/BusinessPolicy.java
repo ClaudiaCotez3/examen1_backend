@@ -10,7 +10,7 @@ import org.springframework.data.mongodb.core.mapping.Document;
 import org.springframework.data.mongodb.core.mapping.Field;
 
 import java.time.LocalDateTime;
-import java.util.List;
+import java.util.Map;
 
 /**
  * Definition-layer root: one business process (e.g. "Instalación de router",
@@ -54,12 +54,21 @@ public class BusinessPolicy {
     private String bpmnXml;
 
     /**
-     * Process-level prerequisites (e.g. "Documento de identidad", "Factura
-     * de luz"). Validated *before* a {@link Procedure} can be started for
-     * this policy — not per activity. Plain strings to stay open for the UI.
+     * Dynamic form the consultor fills when initiating a case for this
+     * process. Replaces the old free-text {@code requisitos_previos} list
+     * — instead of bullet points, the customer now provides structured data
+     * that is captured on the {@link Procedure} at start time.
      */
-    @Field("requisitos_previos")
-    private List<String> prerequisitos;
+    @Field("start_form_definition")
+    private FormDefinition startFormDefinition;
+
+    /**
+     * Opaque form-js editor schema kept alongside {@link #startFormDefinition}
+     * so the admin re-opens the start form in the builder with the same
+     * layout, labels and component order they authored.
+     */
+    @Field("start_form_schema")
+    private Map<String, Object> startFormSchema;
 
     @Field("fecha_creacion")
     private LocalDateTime fechaCreacion;

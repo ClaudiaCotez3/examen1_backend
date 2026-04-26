@@ -3,20 +3,25 @@ package com.example.backend.mapper;
 import com.example.backend.dto.BusinessPolicyRequestDTO;
 import com.example.backend.dto.BusinessPolicyResponseDTO;
 import com.example.backend.model.BusinessPolicy;
+import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
-import java.util.ArrayList;
-import java.util.List;
+import java.util.HashMap;
+import java.util.Map;
 
 @Component
+@RequiredArgsConstructor
 public class BusinessPolicyMapper {
+
+    private final FormMapper formMapper;
 
     public BusinessPolicy toEntity(BusinessPolicyRequestDTO dto) {
         return BusinessPolicy.builder()
                 .nombre(dto.getName())
                 .descripcion(dto.getDescription())
                 .bpmnXml(dto.getBpmnXml())
-                .prerequisitos(copyOrNull(dto.getPrerequisites()))
+                .startFormDefinition(formMapper.toEntity(dto.getStartFormDefinition()))
+                .startFormSchema(copyMapOrNull(dto.getStartFormSchema()))
                 .build();
     }
 
@@ -28,7 +33,8 @@ public class BusinessPolicyMapper {
                 .status(policy.getEstado())
                 .version(policy.getVersion())
                 .bpmnXml(policy.getBpmnXml())
-                .prerequisites(copyOrEmpty(policy.getPrerequisitos()))
+                .startFormDefinition(formMapper.toDefinitionDTO(policy.getStartFormDefinition()))
+                .startFormSchema(copyMapOrNull(policy.getStartFormSchema()))
                 .createdAt(policy.getFechaCreacion())
                 .updatedAt(policy.getFechaActualizacion())
                 .build();
@@ -42,19 +48,19 @@ public class BusinessPolicyMapper {
         if (dto.getBpmnXml() != null) {
             policy.setBpmnXml(dto.getBpmnXml());
         }
-        // Same reasoning for prerequisites: a plain metadata PATCH should not
-        // silently erase them. Only overwrite when the caller explicitly
-        // provided a list (even an empty one).
-        if (dto.getPrerequisites() != null) {
-            policy.setPrerequisitos(new ArrayList<>(dto.getPrerequisites()));
+        // Start form fields: treat "null" from the DTO as "don't touch" so a
+        // metadata-only PATCH doesn't erase a previously configured start
+        // form. To explicitly clear the form, callers can send an empty
+        // FormDefinitionDTO (fields: []) instead of omitting the key.
+        if (dto.getStartFormDefinition() != null) {
+            policy.setStartFormDefinition(formMapper.toEntity(dto.getStartFormDefinition()));
+        }
+        if (dto.getStartFormSchema() != null) {
+            policy.setStartFormSchema(copyMapOrNull(dto.getStartFormSchema()));
         }
     }
 
-    private List<String> copyOrNull(List<String> source) {
-        return source == null ? null : new ArrayList<>(source);
-    }
-
-    private List<String> copyOrEmpty(List<String> source) {
-        return source == null ? new ArrayList<>() : new ArrayList<>(source);
+    private Map<String, Object> copyMapOrNull(Map<String, Object> source) {
+        return source == null ? null : new HashMap<>(source);
     }
 }

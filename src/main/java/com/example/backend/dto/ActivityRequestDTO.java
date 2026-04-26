@@ -63,4 +63,11 @@ public class ActivityRequestDTO {
      * department → ignored).
      */
     private List<String> assignedUserIds;
+
+    /**
+     * Free-form prerequisites attached to the activity by the BPMN designer
+     * via the {@code workflow:requirements} extension attribute. Surfaced to
+     * operators at runtime as a checklist; the engine does not enforce them.
+     */
+    private List<String> requirements;
 }

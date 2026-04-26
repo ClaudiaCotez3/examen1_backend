@@ -8,6 +8,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.util.List;
+import java.util.Map;
 
 @Data
 @Builder
@@ -29,12 +30,22 @@ public class BusinessPolicyRequestDTO {
     private String bpmnXml;
 
     /**
-     * Process-level prerequisites — inputs the customer must provide
-     * <b>before</b> the process can be initiated. Validated at runtime when
-     * a new Procedure is about to be created for this policy. Plain strings
-     * so the UI can keep rendering them as a simple bullet list.
+     * Dynamic form the consultor fills when initiating a case for this
+     * process. Replaces the deprecated free-text prerequisites list: the
+     * customer now provides structured data that travels with the
+     * {@link com.example.backend.model.Procedure} from the moment it is
+     * created.
      */
-    private List<String> prerequisites;
+    @Valid
+    private FormDefinitionDTO startFormDefinition;
+
+    /**
+     * Opaque form-js editor schema paired with {@link #startFormDefinition}
+     * so the admin re-opens the builder with the exact layout they authored.
+     * Accepted as a loose map — the backend stores it verbatim without
+     * interpreting it.
+     */
+    private Map<String, Object> startFormSchema;
 
     /** Used only by saveFullPolicyStructure — left null for plain create/update. */
     @Valid

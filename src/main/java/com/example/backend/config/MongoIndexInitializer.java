@@ -30,18 +30,18 @@ public class MongoIndexInitializer {
 
         // usuarios
         IndexOperations users = mongoTemplate.indexOps(User.class);
-        users.ensureIndex(new Index().on("rol_id", Sort.Direction.ASC).on("activo", Sort.Direction.ASC));
+        users.createIndex(new Index().on("rol_id", Sort.Direction.ASC).on("activo", Sort.Direction.ASC));
 
         // politicas_negocio
         IndexOperations policies = mongoTemplate.indexOps(BusinessPolicy.class);
-        policies.ensureIndex(new Index().on("estado", Sort.Direction.ASC).on("fecha_creacion", Sort.Direction.DESC));
+        policies.createIndex(new Index().on("estado", Sort.Direction.ASC).on("fecha_creacion", Sort.Direction.DESC));
 
         // versiones_politica
         IndexOperations versions = mongoTemplate.indexOps(PolicyVersion.class);
-        versions.ensureIndex(new Index().on("politica_id", Sort.Direction.ASC).on("numero_version", Sort.Direction.DESC));
-        versions.ensureIndex(new Index().on("politica_id", Sort.Direction.ASC).on("estado", Sort.Direction.ASC));
+        versions.createIndex(new Index().on("politica_id", Sort.Direction.ASC).on("numero_version", Sort.Direction.DESC));
+        versions.createIndex(new Index().on("politica_id", Sort.Direction.ASC).on("estado", Sort.Direction.ASC));
         dropIndexIfExists(versions, "uniq_version_activa_por_politica");
-        versions.ensureIndex(new Index()
+        versions.createIndex(new Index()
                 .on("politica_id", Sort.Direction.ASC)
                 .unique()
                 .partial(PartialIndexFilter.of(Criteria.where("estado").is("ACTIVE")))
@@ -49,43 +49,43 @@ public class MongoIndexInitializer {
 
         // calles
         IndexOperations lanes = mongoTemplate.indexOps(Lane.class);
-        lanes.ensureIndex(new Index().on("politica_id", Sort.Direction.ASC).on("posicion", Sort.Direction.ASC));
+        lanes.createIndex(new Index().on("politica_id", Sort.Direction.ASC).on("posicion", Sort.Direction.ASC));
 
         // actividades
         IndexOperations activities = mongoTemplate.indexOps(Activity.class);
-        activities.ensureIndex(new Index().on("politica_id", Sort.Direction.ASC).on("calle_id", Sort.Direction.ASC));
-        activities.ensureIndex(new Index().on("politica_id", Sort.Direction.ASC).on("tipo", Sort.Direction.ASC));
+        activities.createIndex(new Index().on("politica_id", Sort.Direction.ASC).on("calle_id", Sort.Direction.ASC));
+        activities.createIndex(new Index().on("politica_id", Sort.Direction.ASC).on("tipo", Sort.Direction.ASC));
 
         // flujos
         IndexOperations flows = mongoTemplate.indexOps(Flow.class);
-        flows.ensureIndex(new Index().on("actividad_origen_id", Sort.Direction.ASC));
-        flows.ensureIndex(new Index().on("actividad_destino_id", Sort.Direction.ASC));
+        flows.createIndex(new Index().on("actividad_origen_id", Sort.Direction.ASC));
+        flows.createIndex(new Index().on("actividad_destino_id", Sort.Direction.ASC));
 
         // campos_formulario
         IndexOperations formFields = mongoTemplate.indexOps(FormField.class);
-        formFields.ensureIndex(new Index().on("formulario_id", Sort.Direction.ASC));
+        formFields.createIndex(new Index().on("formulario_id", Sort.Direction.ASC));
 
         // tramites
         IndexOperations procedures = mongoTemplate.indexOps(Procedure.class);
-        procedures.ensureIndex(new Index().on("estado", Sort.Direction.ASC).on("fecha_inicio", Sort.Direction.DESC));
-        procedures.ensureIndex(new Index().on("version_politica_id", Sort.Direction.ASC).on("estado", Sort.Direction.ASC));
+        procedures.createIndex(new Index().on("estado", Sort.Direction.ASC).on("fecha_inicio", Sort.Direction.DESC));
+        procedures.createIndex(new Index().on("version_politica_id", Sort.Direction.ASC).on("estado", Sort.Direction.ASC));
 
         // instancias_actividad (críticos)
         IndexOperations activityInstances = mongoTemplate.indexOps(ActivityInstance.class);
-        activityInstances.ensureIndex(new Index()
+        activityInstances.createIndex(new Index()
                 .on("asignado_a", Sort.Direction.ASC)
                 .on("estado", Sort.Direction.ASC)
                 .on("fecha_inicio", Sort.Direction.DESC));
-        activityInstances.ensureIndex(new Index().on("tramite_id", Sort.Direction.ASC).on("estado", Sort.Direction.ASC));
-        activityInstances.ensureIndex(new Index().on("actividad_id", Sort.Direction.ASC).on("estado", Sort.Direction.ASC));
+        activityInstances.createIndex(new Index().on("tramite_id", Sort.Direction.ASC).on("estado", Sort.Direction.ASC));
+        activityInstances.createIndex(new Index().on("actividad_id", Sort.Direction.ASC).on("estado", Sort.Direction.ASC));
         // Phase 4 — operator Kanban global scan (no filters): sort by fecha_inicio DESC
-        activityInstances.ensureIndex(new Index()
+        activityInstances.createIndex(new Index()
                 .on("estado", Sort.Direction.ASC)
                 .on("fecha_inicio", Sort.Direction.DESC));
         // Pool visibility: WAITING tasks where the operator is in the eligible
         // pool. Mongo can use a multikey compound index to serve this query
         // without a collection scan as soon as the data set grows.
-        activityInstances.ensureIndex(new Index()
+        activityInstances.createIndex(new Index()
                 .on("usuarios_asignados", Sort.Direction.ASC)
                 .on("estado", Sort.Direction.ASC));
 
@@ -96,22 +96,22 @@ public class MongoIndexInitializer {
         // Drop the auto-created index from the previous @Indexed annotation
         // (named after the field) so we can claim its key with our own named index.
         dropIndexIfExists(formResponses, "instancia_actividad_id");
-        formResponses.ensureIndex(new Index()
+        formResponses.createIndex(new Index()
                 .on("instancia_actividad_id", Sort.Direction.ASC)
                 .unique()
                 .named("uniq_form_response_por_instancia"));
-        formResponses.ensureIndex(new Index()
+        formResponses.createIndex(new Index()
                 .on("submitted_by", Sort.Direction.ASC)
                 .on("submitted_at", Sort.Direction.DESC));
 
         // historial_tramite
         IndexOperations procedureHistory = mongoTemplate.indexOps(ProcedureHistory.class);
-        procedureHistory.ensureIndex(new Index().on("tramite_id", Sort.Direction.ASC).on("fecha", Sort.Direction.DESC));
-        procedureHistory.ensureIndex(new Index().on("usuario_id", Sort.Direction.ASC).on("fecha", Sort.Direction.DESC));
+        procedureHistory.createIndex(new Index().on("tramite_id", Sort.Direction.ASC).on("fecha", Sort.Direction.DESC));
+        procedureHistory.createIndex(new Index().on("usuario_id", Sort.Direction.ASC).on("fecha", Sort.Direction.DESC));
 
         // kpis
         IndexOperations kpis = mongoTemplate.indexOps(Kpi.class);
-        kpis.ensureIndex(new Index()
+        kpis.createIndex(new Index()
                 .on("politica_id", Sort.Direction.ASC)
                 .on("actividad_id", Sort.Direction.ASC)
                 .unique()
@@ -119,8 +119,8 @@ public class MongoIndexInitializer {
 
         // registros_ia
         IndexOperations aiLogs = mongoTemplate.indexOps(AiLog.class);
-        aiLogs.ensureIndex(new Index().on("tramite_id", Sort.Direction.ASC).on("fecha", Sort.Direction.DESC));
-        aiLogs.ensureIndex(new Index().on("tipo", Sort.Direction.ASC).on("fecha", Sort.Direction.DESC));
+        aiLogs.createIndex(new Index().on("tramite_id", Sort.Direction.ASC).on("fecha", Sort.Direction.DESC));
+        aiLogs.createIndex(new Index().on("tipo", Sort.Direction.ASC).on("fecha", Sort.Direction.DESC));
 
         log.info("Índices MongoDB inicializados correctamente.");
     }

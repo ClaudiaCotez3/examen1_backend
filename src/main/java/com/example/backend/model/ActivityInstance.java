@@ -12,22 +12,6 @@ import org.springframework.data.mongodb.core.mapping.Field;
 import java.time.LocalDateTime;
 import java.util.List;
 
-/**
- * Runtime instance of an {@link Activity} for a specific {@link Procedure}
- * (case file). This is the row operators interact with in the Kanban.
- *
- * Assignment model (matches the BPMN designer):
- *   - {@link #assignedUserIds} is the <b>pool</b> of eligible operators,
- *     copied at creation from the {@link Activity} definition. One or many
- *     ids are allowed; when the pool has more than one user any of them can
- *     claim the task, but only the first to do so wins.
- *   - {@link #claimedBy} is the operator who took the task. Null until the
- *     pool is narrowed to a single owner; once set it never changes.
- *
- * State machine (strict — {@link com.example.backend.service.WorkflowEngineService}
- * enforces legal transitions):
- *   WAITING → IN_PROGRESS → COMPLETED
- */
 @Data
 @Builder
 @NoArgsConstructor
@@ -41,7 +25,6 @@ public class ActivityInstance {
     @Field("tramite_id")
     private ObjectId tramiteId;
 
-    /** Pointer to the {@link Activity} (activityDefinitionId). */
     @Field("actividad_id")
     private ObjectId actividadId;
 
@@ -49,26 +32,21 @@ public class ActivityInstance {
     private String estado;
 
     /**
-     * Pool of operators eligible to claim this task. Copied from the
-     * activity definition's {@code assignedUserIds} at instance creation.
-     *
-     * Backed by the Mongo field {@code usuarios_asignados} (mirrors the
-     * field name on {@link Activity}). Empty for non-TASK nodes
-     * (START / END / DECISION) — those are auto-advanced by the engine.
-     */
-    @Field("usuarios_asignados")
-    private List<ObjectId> assignedUserIds;
-
-    /**
-     * Operator who took the task. Null while WAITING (pool-visible). Set
-     * atomically by the "take task" flow together with the transition to
-     * IN_PROGRESS. Only this user can complete the task.
-     *
-     * Kept on the legacy Mongo field {@code asignado_a} so existing
-     * documents keep working without migration.
+     * Operator who claimed the task. Null while the instance is still in the
+     * pool (en_espera and unclaimed). Persisted under {@code asignado_a} for
+     * back-compat with documents written before the rename.
      */
     @Field("asignado_a")
     private ObjectId claimedBy;
+
+    /**
+     * Snapshot of the eligible operator pool taken from the activity
+     * definition at instance creation time. Frozen on the instance so changes
+     * to the policy after a case starts don't reshuffle who can claim a
+     * pending task.
+     */
+    @Field("usuarios_asignados")
+    private List<ObjectId> assignedUserIds;
 
     @Field("fecha_creacion")
     private LocalDateTime createdAt;

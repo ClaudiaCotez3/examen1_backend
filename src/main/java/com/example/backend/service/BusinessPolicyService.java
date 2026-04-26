@@ -21,11 +21,20 @@ import com.example.backend.model.Activity;
 import com.example.backend.model.BusinessPolicy;
 import com.example.backend.model.Flow;
 import com.example.backend.model.Lane;
+import com.example.backend.repository.ActivityInstanceRepository;
 import com.example.backend.repository.ActivityRepository;
 import com.example.backend.repository.BusinessPolicyRepository;
 import com.example.backend.repository.FlowRepository;
 import com.example.backend.repository.LaneRepository;
+import com.example.backend.repository.PolicyVersionRepository;
+import com.example.backend.repository.ProcedureHistoryRepository;
+import com.example.backend.repository.ProcedureRepository;
+import com.example.backend.model.ActivityInstance;
+import com.example.backend.model.PolicyVersion;
+import com.example.backend.model.Procedure;
+import com.example.backend.model.ProcedureHistory;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.bson.types.ObjectId;
 import org.springframework.stereotype.Service;
 
@@ -37,6 +46,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class BusinessPolicyService {
@@ -48,12 +58,15 @@ public class BusinessPolicyService {
 
     private static final Set<String> ACTIVITY_TYPES = Set.of("START", "TASK", "DECISION", "END");
     private static final Set<String> FLOW_TYPES = Set.of("LINEAR", "CONDITIONAL", "PARALLEL", "LOOP");
-    private static final Set<String> ASSIGNMENT_TYPES = Set.of("USER", "CANDIDATE_USERS", "DEPARTMENT");
 
     private final BusinessPolicyRepository policyRepository;
     private final LaneRepository laneRepository;
     private final ActivityRepository activityRepository;
     private final FlowRepository flowRepository;
+    private final PolicyVersionRepository policyVersionRepository;
+    private final ProcedureRepository procedureRepository;
+    private final ProcedureHistoryRepository procedureHistoryRepository;
+    private final ActivityInstanceRepository activityInstanceRepository;
 
     private final BusinessPolicyMapper policyMapper;
     private final LaneMapper laneMapper;
@@ -67,7 +80,6 @@ public class BusinessPolicyService {
         BusinessPolicy entity = policyMapper.toEntity(request);
         LocalDateTime now = LocalDateTime.now();
         entity.setEstado(resolveStatusOrDefault(request.getStatus()));
-        entity.setVersion(1);
         entity.setFechaCreacion(now);
         entity.setFechaActualizacion(now);
         BusinessPolicy saved = policyRepository.save(entity);
@@ -97,15 +109,68 @@ public class BusinessPolicyService {
         return buildFullResponse(policy);
     }
 
-    /** Logical delete: flips status to ARCHIVED instead of removing documents. */
+    /**
+     * Cascade hard-delete: removes the policy AND every dependent document so
+     * the operator Kanban doesn't keep showing tasks from a process the admin
+     * already decided to retire.
+     *
+     * Affected collections (in dependency order):
+     *   instancias_actividad → historial_tramite → tramites
+     *   versiones_politica
+     *   flujos → actividades → calles
+     *   politicas_negocio
+     *
+     * No DB-level transactions on the standalone Mongo dev replica, so we run
+     * the deletes top-down and log a warning on failure — the dependent docs
+     * left behind would otherwise produce phantom tasks like the ones the
+     * user reported. Best-effort is the right semantics here: any cleanup
+     * partial failure is recoverable via the {@code purge-orphans} endpoint.
+     */
     public void deletePolicy(String id) {
         BusinessPolicy policy = findPolicyOrThrow(id);
-        if (STATUS_ARCHIVED.equals(policy.getEstado())) {
-            throw new BadRequestException("Policy is already archived");
+        ObjectId policyId = policy.getId();
+
+        // 1. Procedures + their runtime children (instances + history)
+        List<PolicyVersion> versions = policyVersionRepository
+                .findByPoliticaIdOrderByNumeroVersionDesc(policyId);
+        List<ObjectId> versionIds = versions.stream().map(PolicyVersion::getId).toList();
+
+        List<Procedure> procedures = new ArrayList<>();
+        for (ObjectId versionId : versionIds) {
+            // No "findByVersionPoliticaId" without status filter exists yet, so
+            // collect across both runtime states explicitly.
+            procedures.addAll(procedureRepository.findByVersionPoliticaIdAndEstado(versionId, "activo"));
+            procedures.addAll(procedureRepository.findByVersionPoliticaIdAndEstado(versionId, "finalizado"));
         }
-        policy.setEstado(STATUS_ARCHIVED);
-        policy.setFechaActualizacion(LocalDateTime.now());
-        policyRepository.save(policy);
+        for (Procedure procedure : procedures) {
+            ObjectId tramiteId = procedure.getId();
+            List<ActivityInstance> instances = activityInstanceRepository.findByTramiteId(tramiteId);
+            if (!instances.isEmpty()) {
+                activityInstanceRepository.deleteAll(instances);
+            }
+            List<ProcedureHistory> history = procedureHistoryRepository
+                    .findByTramiteIdOrderByFechaAsc(tramiteId);
+            if (!history.isEmpty()) {
+                procedureHistoryRepository.deleteAll(history);
+            }
+        }
+        if (!procedures.isEmpty()) {
+            procedureRepository.deleteAll(procedures);
+        }
+
+        // 2. Versions
+        if (!versions.isEmpty()) {
+            policyVersionRepository.deleteAll(versions);
+        }
+
+        // 3. Definition graph: flows → activities → lanes
+        deleteGraph(policyId);
+
+        // 4. The policy itself
+        policyRepository.delete(policy);
+
+        log.info("Policy {} deleted (cascade): {} procedure(s), {} version(s)",
+                policyId.toHexString(), procedures.size(), versions.size());
     }
 
     /**
@@ -119,52 +184,37 @@ public class BusinessPolicyService {
         BusinessPolicy policy = policyMapper.toEntity(request);
         LocalDateTime now = LocalDateTime.now();
         policy.setEstado(resolveStatusOrDefault(request.getStatus()));
-        policy.setVersion(1);
         policy.setFechaCreacion(now);
         policy.setFechaActualizacion(now);
         BusinessPolicy savedPolicy = policyRepository.save(policy);
 
-        List<Lane> savedLanes = new ArrayList<>();
-        List<Activity> savedActivities = new ArrayList<>();
-        List<Flow> savedFlows = new ArrayList<>();
-
         try {
-            persistChildren(request, savedPolicy.getId(), savedLanes, savedActivities, savedFlows);
+            persistGraph(savedPolicy, request);
         } catch (RuntimeException ex) {
-            savedFlows.forEach(flowRepository::delete);
-            savedActivities.forEach(activityRepository::delete);
-            savedLanes.forEach(laneRepository::delete);
+            // Best-effort rollback: graph helper already cleared its own
+            // partials, so we only need to undo the policy insert here.
             policyRepository.delete(savedPolicy);
             throw ex;
         }
 
-        // Mint a snapshot AFTER the structural save succeeds so failed
-        // attempts don't leave phantom version records. Bump policy.version
-        // to mirror the new snapshot number, so clients can read the active
-        // version without querying the versions collection.
-        PolicyVersionResponseDTO snapshot =
-                policyVersionService.createSnapshot(savedPolicy.getId(), savedPolicy.getBpmnXml());
-        if (snapshot != null && snapshot.getVersionNumber() != null) {
-            savedPolicy.setVersion(snapshot.getVersionNumber());
-            policyRepository.save(savedPolicy);
-        }
-
+        policyVersionService.createSnapshot(savedPolicy.getId(), savedPolicy.getBpmnXml());
         return buildFullResponse(savedPolicy);
     }
 
     /**
-     * Replaces the full graph of an existing policy. Strategy: validate the
-     * incoming graph, wipe the current lanes/activities/flows, then re-insert
-     * from the payload. The policy document itself (name, description,
-     * bpmnXml, prerequisites, status) is updated in place so the Mongo `_id`
-     * and version history stay stable, and runtime {@link Procedure}s that
-     * reference a pinned {@link PolicyVersion} keep working against the
-     * snapshot that minted them.
+     * Replaces the full graph of an existing policy. Used by the visual
+     * designer's "Guardar" button when editing a policy that already has an
+     * id. Steps:
+     *   1) validate the new graph
+     *   2) update policy metadata (name / description / status / bpmn xml)
+     *   3) wipe existing lanes / activities / flows for this policy
+     *   4) re-insert the incoming graph
+     *   5) mint a new version snapshot
      */
     public BusinessPolicyResponseDTO updateFullPolicyStructure(String id, BusinessPolicyRequestDTO request) {
         validateGraph(request);
-
         BusinessPolicy policy = findPolicyOrThrow(id);
+
         policyMapper.updateEntity(policy, request);
         if (request.getStatus() != null) {
             policy.setEstado(resolveStatusOrDefault(request.getStatus()));
@@ -172,84 +222,79 @@ public class BusinessPolicyService {
         policy.setFechaActualizacion(LocalDateTime.now());
         BusinessPolicy savedPolicy = policyRepository.save(policy);
 
-        // Wipe existing children so the re-insert starts from a clean slate.
-        // Flows are deleted first to avoid referencing soon-to-be-gone activities.
-        ObjectId policyId = savedPolicy.getId();
-        List<Activity> existingActivities = activityRepository.findByPoliticaId(policyId);
-        List<ObjectId> existingActivityIds = new ArrayList<>();
-        for (Activity a : existingActivities) {
-            existingActivityIds.add(a.getId());
-        }
-        if (!existingActivityIds.isEmpty()) {
-            List<Flow> existingFlows = flowRepository.findByActividadOrigenIdIn(existingActivityIds);
-            existingFlows.forEach(flowRepository::delete);
-        }
-        existingActivities.forEach(activityRepository::delete);
-        laneRepository.findByPoliticaIdOrderByPosicionAsc(policyId).forEach(laneRepository::delete);
+        deleteGraph(savedPolicy.getId());
+        persistGraph(savedPolicy, request);
 
+        policyVersionService.createSnapshot(savedPolicy.getId(), savedPolicy.getBpmnXml());
+        return buildFullResponse(savedPolicy);
+    }
+
+    /**
+     * Inserts lanes/activities/flows for the given policy, resolving
+     * client-side references to Mongo ids as it goes. On failure, deletes
+     * whatever it had already inserted before rethrowing so callers don't
+     * have to reason about partial state.
+     */
+    private void persistGraph(BusinessPolicy policy, BusinessPolicyRequestDTO request) {
         List<Lane> savedLanes = new ArrayList<>();
         List<Activity> savedActivities = new ArrayList<>();
         List<Flow> savedFlows = new ArrayList<>();
 
-        // No rollback of the wipe on failure: Mongo doesn't give us a free
-        // transaction here, and restoring the old children would require
-        // keeping them buffered in memory. If the re-insert blows up the
-        // policy is left with whatever children made it in; the admin can
-        // retry the save to fix it. Validation above makes this unlikely.
-        persistChildren(request, policyId, savedLanes, savedActivities, savedFlows);
+        try {
+            Map<String, ObjectId> laneIdByClientId = new HashMap<>();
+            for (LaneRequestDTO laneDto : request.getLanes()) {
+                Lane saved = laneRepository.save(laneMapper.toEntity(laneDto, policy.getId()));
+                savedLanes.add(saved);
+                if (laneDto.getClientId() != null) {
+                    laneIdByClientId.put(laneDto.getClientId(), saved.getId());
+                }
+            }
 
-        PolicyVersionResponseDTO snapshot =
-                policyVersionService.createSnapshot(policyId, savedPolicy.getBpmnXml());
-        if (snapshot != null && snapshot.getVersionNumber() != null) {
-            savedPolicy.setVersion(snapshot.getVersionNumber());
-            policyRepository.save(savedPolicy);
+            Map<String, ObjectId> activityIdByClientId = new HashMap<>();
+            for (ActivityRequestDTO activityDto : request.getActivities()) {
+                ObjectId laneId = laneIdByClientId.get(activityDto.getLaneRef());
+                if (laneId == null) {
+                    throw new BadRequestException(
+                            "Activity '" + activityDto.getName() + "' references unknown lane: " + activityDto.getLaneRef());
+                }
+                Activity saved = activityRepository.save(
+                        activityMapper.toEntity(activityDto, policy.getId(), laneId));
+                savedActivities.add(saved);
+                if (activityDto.getClientId() != null) {
+                    activityIdByClientId.put(activityDto.getClientId(), saved.getId());
+                }
+            }
+
+            for (FlowRequestDTO flowDto : request.getFlows()) {
+                ObjectId sourceId = activityIdByClientId.get(flowDto.getSourceRef());
+                ObjectId targetId = activityIdByClientId.get(flowDto.getTargetRef());
+                if (sourceId == null) {
+                    throw new BadRequestException("Flow references unknown source activity: " + flowDto.getSourceRef());
+                }
+                if (targetId == null) {
+                    throw new BadRequestException("Flow references unknown target activity: " + flowDto.getTargetRef());
+                }
+                savedFlows.add(flowRepository.save(flowMapper.toEntity(flowDto, sourceId, targetId)));
+            }
+        } catch (RuntimeException ex) {
+            savedFlows.forEach(flowRepository::delete);
+            savedActivities.forEach(activityRepository::delete);
+            savedLanes.forEach(laneRepository::delete);
+            throw ex;
         }
-
-        return buildFullResponse(savedPolicy);
     }
 
-    private void persistChildren(BusinessPolicyRequestDTO request,
-                                 ObjectId policyId,
-                                 List<Lane> savedLanes,
-                                 List<Activity> savedActivities,
-                                 List<Flow> savedFlows) {
-        Map<String, ObjectId> laneIdByClientId = new HashMap<>();
-        for (LaneRequestDTO laneDto : request.getLanes()) {
-            Lane lane = laneMapper.toEntity(laneDto, policyId);
-            Lane saved = laneRepository.save(lane);
-            savedLanes.add(saved);
-            if (laneDto.getClientId() != null) {
-                laneIdByClientId.put(laneDto.getClientId(), saved.getId());
-            }
+    /** Removes the lanes / activities / flows that belong to the given policy. */
+    private void deleteGraph(ObjectId policyId) {
+        List<Activity> activities = activityRepository.findByPoliticaId(policyId);
+        if (!activities.isEmpty()) {
+            List<ObjectId> activityIds = activities.stream().map(Activity::getId).toList();
+            flowRepository.deleteAll(flowRepository.findByActividadOrigenIdIn(activityIds));
+            activityRepository.deleteAll(activities);
         }
-
-        Map<String, ObjectId> activityIdByClientId = new HashMap<>();
-        for (ActivityRequestDTO activityDto : request.getActivities()) {
-            ObjectId laneId = laneIdByClientId.get(activityDto.getLaneRef());
-            if (laneId == null) {
-                throw new BadRequestException(
-                        "Activity '" + activityDto.getName() + "' references unknown lane: " + activityDto.getLaneRef());
-            }
-            Activity activity = activityMapper.toEntity(activityDto, policyId, laneId);
-            Activity saved = activityRepository.save(activity);
-            savedActivities.add(saved);
-            if (activityDto.getClientId() != null) {
-                activityIdByClientId.put(activityDto.getClientId(), saved.getId());
-            }
-        }
-
-        for (FlowRequestDTO flowDto : request.getFlows()) {
-            ObjectId sourceId = activityIdByClientId.get(flowDto.getSourceRef());
-            ObjectId targetId = activityIdByClientId.get(flowDto.getTargetRef());
-            if (sourceId == null) {
-                throw new BadRequestException("Flow references unknown source activity: " + flowDto.getSourceRef());
-            }
-            if (targetId == null) {
-                throw new BadRequestException("Flow references unknown target activity: " + flowDto.getTargetRef());
-            }
-            Flow flow = flowMapper.toEntity(flowDto, sourceId, targetId);
-            Flow saved = flowRepository.save(flow);
-            savedFlows.add(saved);
+        List<Lane> lanes = laneRepository.findByPoliticaIdOrderByPosicionAsc(policyId);
+        if (!lanes.isEmpty()) {
+            laneRepository.deleteAll(lanes);
         }
     }
 
@@ -270,8 +315,9 @@ public class BusinessPolicyService {
         if (structure == null) {
             structure = bpmnXmlParser.parse(request.getBpmnXml());
         }
-        // The XML is the authoritative diagram representation — always
-        // overwrite whatever the structure claimed with what the caller sent.
+        // Always overwrite the XML with what the caller actually sent — the
+        // parser-derived structure may not contain it, and the XML is the
+        // authoritative diagram representation.
         structure.setBpmnXml(request.getBpmnXml());
 
         BusinessPolicyResponseDTO saved = saveFullPolicyStructure(structure);
@@ -326,7 +372,7 @@ public class BusinessPolicyService {
         List<FlowRequestDTO> flows = request.getFlows();
 
         if (lanes == null || lanes.isEmpty()) {
-            throw new BadRequestException("Policy must contain at least one department (lane)");
+            throw new BadRequestException("Policy must contain at least one lane");
         }
         if (activities == null || activities.isEmpty()) {
             throw new BadRequestException("Policy must contain at least one activity");
@@ -338,10 +384,10 @@ public class BusinessPolicyService {
         Set<String> laneClientIds = new HashSet<>();
         for (LaneRequestDTO lane : lanes) {
             if (lane.getClientId() == null || lane.getClientId().isBlank()) {
-                throw new BadRequestException("Each department must declare a clientId for full-policy save");
+                throw new BadRequestException("Each lane must declare a clientId for full-policy save");
             }
             if (!laneClientIds.add(lane.getClientId())) {
-                throw new BadRequestException("Duplicate department clientId: " + lane.getClientId());
+                throw new BadRequestException("Duplicate lane clientId: " + lane.getClientId());
             }
         }
 
@@ -361,17 +407,7 @@ public class BusinessPolicyService {
             }
             if (!laneClientIds.contains(activity.getLaneRef())) {
                 throw new BadRequestException(
-                        "Activity '" + activity.getName() + "' references unknown department: " + activity.getLaneRef());
-            }
-            // Only TASK activities carry an assignment type; validate when one was sent.
-            if ("TASK".equals(activity.getType())
-                    && activity.getAssignmentType() != null
-                    && !activity.getAssignmentType().isBlank()
-                    && !ASSIGNMENT_TYPES.contains(activity.getAssignmentType())) {
-                throw new BadRequestException(
-                        "Invalid assignmentType '" + activity.getAssignmentType()
-                                + "' for activity '" + activity.getName()
-                                + "'. Allowed: " + ASSIGNMENT_TYPES);
+                        "Activity '" + activity.getName() + "' references unknown lane: " + activity.getLaneRef());
             }
             if ("START".equals(activity.getType())) {
                 startCount++;

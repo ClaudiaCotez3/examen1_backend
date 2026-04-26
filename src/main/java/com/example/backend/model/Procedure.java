@@ -11,6 +11,7 @@ import org.springframework.data.mongodb.core.mapping.Document;
 import org.springframework.data.mongodb.core.mapping.Field;
 
 import java.time.LocalDateTime;
+import java.util.Map;
 
 @Data
 @Builder
@@ -30,6 +31,16 @@ public class Procedure {
 
     /** activo | finalizado */
     private String estado;
+
+    /**
+     * Structured payload captured from the start form when the case was
+     * opened. Shape is driven by {@link BusinessPolicy#getStartFormDefinition()}:
+     * scalar fields map to primitives, groups to nested maps, dynamic lists
+     * to arrays of maps. Stored as a loose map so the schema can evolve
+     * without a model migration.
+     */
+    @Field("start_form_data")
+    private Map<String, Object> startFormData;
 
     @Field("fecha_inicio")
     private LocalDateTime fechaInicio;

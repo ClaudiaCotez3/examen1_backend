@@ -7,6 +7,7 @@ import lombok.NoArgsConstructor;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 
 @Data
 @Builder
@@ -22,8 +23,10 @@ public class BusinessPolicyResponseDTO {
     private Integer version;
     /** Raw BPMN 2.0 XML for the diagram, when one was persisted. */
     private String bpmnXml;
-    /** Process-level prerequisites — see {@link BusinessPolicyRequestDTO#getPrerequisites()}. */
-    private List<String> prerequisites;
+    /** Dynamic start form the consultor fills to initiate a case. */
+    private FormDefinitionDTO startFormDefinition;
+    /** form-js editor schema paired with {@link #startFormDefinition}. */
+    private Map<String, Object> startFormSchema;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 

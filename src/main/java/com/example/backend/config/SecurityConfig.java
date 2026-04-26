@@ -8,6 +8,7 @@ import com.example.backend.security.RoleName;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
 import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
@@ -75,6 +76,12 @@ public class SecurityConfig {
 
                         // Admin-only domain resources (user and role management, workflow design)
                         .requestMatchers("/api/users/**", "/api/roles/**").hasRole(RoleName.ADMIN)
+                        // Read access to policies is open to any authenticated role so the
+                        // "Iniciar trámite" flow (customer-facing consultor) can list
+                        // active policies and their versions. Write operations still require ADMIN.
+                        .requestMatchers(HttpMethod.GET, "/api/policies/**")
+                                .hasAnyRole(RoleName.ADMIN, RoleName.SUPERVISOR,
+                                        RoleName.CONSULTATION, RoleName.OPERATOR)
                         .requestMatchers("/api/policies/**",
                                 "/api/activities/**",
                                 "/api/flows/**",
@@ -85,6 +92,11 @@ public class SecurityConfig {
                                 .hasAnyRole(RoleName.OPERATOR, RoleName.SUPERVISOR, RoleName.ADMIN)
                         .requestMatchers("/api/case-files/**")
                                 .hasAnyRole(RoleName.OPERATOR, RoleName.SUPERVISOR, RoleName.ADMIN, RoleName.CONSULTATION)
+                        // Consultor-facing "Iniciar trámite" endpoint — same roles as
+                        // the legacy case-files namespace so the front desk can launch
+                        // a process and the operator Kanban can still read it.
+                        .requestMatchers("/api/cases/**")
+                                .hasAnyRole(RoleName.CONSULTATION, RoleName.SUPERVISOR, RoleName.ADMIN)
                         .requestMatchers("/api/forms/**")
                                 .hasAnyRole(RoleName.OPERATOR, RoleName.SUPERVISOR, RoleName.ADMIN, RoleName.CONSULTATION)
 
