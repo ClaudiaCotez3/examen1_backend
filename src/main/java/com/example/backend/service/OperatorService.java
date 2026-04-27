@@ -1,18 +1,26 @@
 package com.example.backend.service;
 
+import com.example.backend.dto.CaseStartFormDTO;
 import com.example.backend.dto.OperatorTaskDTO;
 import com.example.backend.dto.OperatorTasksResponseDTO;
 import com.example.backend.exception.BadRequestException;
 import com.example.backend.exception.ResourceNotFoundException;
+import com.example.backend.mapper.FormMapper;
 import com.example.backend.mapper.OperatorMapper;
 import com.example.backend.model.Activity;
 import com.example.backend.model.ActivityInstance;
+import com.example.backend.model.BusinessPolicy;
+import com.example.backend.model.FormDefinition;
 import com.example.backend.model.Lane;
+import com.example.backend.model.PolicyVersion;
 import com.example.backend.model.Procedure;
 import com.example.backend.model.Role;
 import com.example.backend.model.User;
 import com.example.backend.repository.ActivityRepository;
+import com.example.backend.repository.BusinessPolicyRepository;
+import com.example.backend.repository.FlowRepository;
 import com.example.backend.repository.LaneRepository;
+import com.example.backend.repository.PolicyVersionRepository;
 import com.example.backend.repository.ProcedureRepository;
 import com.example.backend.repository.RoleRepository;
 import com.example.backend.repository.UserRepository;
@@ -53,6 +61,8 @@ public class OperatorService {
     private static final String STATE_WAITING = "en_espera";
     private static final String STATE_IN_PROGRESS = "en_proceso";
     private static final String STATE_COMPLETED = "finalizado";
+    private static final String STATE_BLOCKED = "bloqueada";
+    private static final String STATE_DISCARDED = "descartada";
 
     private final MongoTemplate mongoTemplate;
     private final UserRepository userRepository;
@@ -60,8 +70,12 @@ public class OperatorService {
     private final ActivityRepository activityRepository;
     private final LaneRepository laneRepository;
     private final ProcedureRepository procedureRepository;
+    private final PolicyVersionRepository policyVersionRepository;
+    private final BusinessPolicyRepository businessPolicyRepository;
+    private final FlowRepository flowRepository;
 
     private final OperatorMapper operatorMapper;
+    private final FormMapper formMapper;
 
     // ── Main query: grouped tasks for the Kanban UI ───────────────────────
 
@@ -112,6 +126,28 @@ public class OperatorService {
         Map<ObjectId, Procedure> caseFilesById = procedureRepository.findAllById(caseFileIds).stream()
                 .collect(Collectors.toMap(Procedure::getId, Function.identity()));
 
+        // Pre-compute the "feeds a DECISION gateway" set so the operator UI
+        // knows which tasks need the Aprobar / Rechazar follow-up dialog
+        // even when they have a regular form attached.
+        java.util.Set<ObjectId> decisionFeederIds = new java.util.HashSet<>();
+        for (Activity activity : activitiesById.values()) {
+            for (var flow : flowRepository.findByActividadOrigenId(activity.getId())) {
+                Activity target = flow.getActividadDestinoId() == null
+                        ? null
+                        : activitiesById.get(flow.getActividadDestinoId());
+                // Targets we don't have in the batch lookup are still worth
+                // checking: hit the repository directly so we don't miss
+                // gateways from other policies (caches do not span policies).
+                if (target == null && flow.getActividadDestinoId() != null) {
+                    target = activityRepository.findById(flow.getActividadDestinoId()).orElse(null);
+                }
+                if (target != null && "DECISION".equals(target.getTipo())) {
+                    decisionFeederIds.add(activity.getId());
+                    break;
+                }
+            }
+        }
+
         // Map to DTOs and bucket by status
         List<OperatorTaskDTO> waiting = new ArrayList<>();
         List<OperatorTaskDTO> inProgress = new ArrayList<>();
@@ -123,11 +159,17 @@ public class OperatorService {
             Procedure caseFile = caseFilesById.get(inst.getTramiteId());
 
             OperatorTaskDTO dto = operatorMapper.toDto(inst, activity, lane, caseFile);
+            dto.setRequiresDecision(activity != null
+                    && decisionFeederIds.contains(activity.getId()));
 
             switch (inst.getEstado()) {
-                case STATE_WAITING -> waiting.add(dto);
+                // BLOCKED tasks share the WAITING column so the operator
+                // sees the full pipeline; the UI gates the "Tomar" button
+                // based on the BLOCKED status, not the column.
+                case STATE_WAITING, STATE_BLOCKED -> waiting.add(dto);
                 case STATE_IN_PROGRESS -> inProgress.add(dto);
                 case STATE_COMPLETED -> completed.add(dto);
+                case STATE_DISCARDED -> { /* hidden — branch was rejected */ }
                 default -> log.warn("Unknown activity instance state: {}", inst.getEstado());
             }
         }
@@ -284,6 +326,31 @@ public class OperatorService {
         return activityRepository.findByCalleId(laneObjectId).stream()
                 .map(Activity::getId)
                 .toList();
+    }
+
+    /**
+     * Returns the start-form snapshot of a trámite — the schema declared
+     * by the policy together with the values the consultor filled in
+     * before launching the case. Used by the operator's task modal to
+     * surface customer info while the operator works on a task.
+     */
+    public CaseStartFormDTO getCaseStartForm(String caseFileId) {
+        ObjectId caseId = parseObjectId(caseFileId, "caseFileId");
+        Procedure procedure = procedureRepository.findById(caseId)
+                .orElseThrow(() -> new ResourceNotFoundException("CaseFile", caseFileId));
+        PolicyVersion version = policyVersionRepository
+                .findById(procedure.getVersionPoliticaId())
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "PolicyVersion", procedure.getVersionPoliticaId().toHexString()));
+        BusinessPolicy policy = businessPolicyRepository.findById(version.getPoliticaId())
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "BusinessPolicy", version.getPoliticaId().toHexString()));
+
+        FormDefinition definition = policy.getStartFormDefinition();
+        return CaseStartFormDTO.builder()
+                .definition(formMapper.toDefinitionDTO(definition))
+                .data(procedure.getStartFormData())
+                .build();
     }
 
     private ObjectId parseObjectId(String value, String field) {

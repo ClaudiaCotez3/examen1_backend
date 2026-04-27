@@ -55,7 +55,11 @@ public class ActivityInstanceController {
     @PostMapping("/{id}/complete")
     public ResponseEntity<CaseFileResponseDTO> completeActivity(
             @PathVariable String id,
-            @RequestParam(required = false) String userId) {
-        return ResponseEntity.ok(workflowEngineService.completeActivity(id, userId));
+            @RequestParam(required = false) String userId,
+            @RequestBody(required = false) java.util.Map<String, Object> body) {
+        String decision = body == null ? null
+                : (String) body.get("decision");
+        return ResponseEntity.ok(
+                workflowEngineService.completeActivity(id, userId, decision));
     }
 }

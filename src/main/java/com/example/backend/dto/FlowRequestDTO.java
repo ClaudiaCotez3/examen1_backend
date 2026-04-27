@@ -25,4 +25,11 @@ public class FlowRequestDTO {
     private String type;
 
     private String condition;
+
+    /**
+     * Human-readable label for branches out of a DECISION gateway.
+     * Null/empty for unconditional or non-decision edges. Round-trips to
+     * {@code workflow:branchLabel} on the BPMN XML.
+     */
+    private String branchLabel;
 }

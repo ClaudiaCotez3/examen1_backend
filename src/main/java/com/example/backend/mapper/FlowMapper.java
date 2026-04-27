@@ -15,6 +15,7 @@ public class FlowMapper {
                 .actividadDestinoId(targetActivityId)
                 .tipo(dto.getType())
                 .condicion(dto.getCondition())
+                .branchLabel(dto.getBranchLabel())
                 .build();
     }
 
@@ -25,6 +26,7 @@ public class FlowMapper {
                 .targetActivityId(flow.getActividadDestinoId() != null ? flow.getActividadDestinoId().toHexString() : null)
                 .type(flow.getTipo())
                 .condition(flow.getCondicion())
+                .branchLabel(flow.getBranchLabel())
                 .build();
     }
 }

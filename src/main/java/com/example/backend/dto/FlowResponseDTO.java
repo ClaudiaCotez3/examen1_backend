@@ -16,4 +16,5 @@ public class FlowResponseDTO {
     private String targetActivityId;
     private String type;
     private String condition;
+    private String branchLabel;
 }

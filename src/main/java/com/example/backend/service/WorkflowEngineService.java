@@ -34,8 +34,10 @@ import org.springframework.data.mongodb.core.query.Update;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -61,6 +63,17 @@ public class WorkflowEngineService {
     private static final String ACTIVITY_WAITING = "en_espera";
     private static final String ACTIVITY_IN_PROGRESS = "en_proceso";
     private static final String ACTIVITY_COMPLETED = "finalizado";
+    /**
+     * Pre-materialised but not yet startable: a TASK whose upstream
+     * predecessors haven't all completed. The operator Kanban renders
+     * these with a lock icon and no "Tomar" button.
+     */
+    private static final String ACTIVITY_BLOCKED = "bloqueada";
+    /**
+     * The branch this instance lived on was not chosen at the gateway
+     * decision point, so the task will never run. Hidden from the operator.
+     */
+    private static final String ACTIVITY_DISCARDED = "descartada";
 
     private static final String VERSION_ACTIVE = "ACTIVE";
     private static final String VERSION_INACTIVE = "INACTIVE";
@@ -315,18 +328,27 @@ public class WorkflowEngineService {
      * If the next activity is an END node, the case file is marked as COMPLETED.
      */
     public CaseFileResponseDTO completeActivity(String activityInstanceId, String userId) {
+        return completeActivity(activityInstanceId, userId, null);
+    }
+
+    /**
+     * Completes a TASK and propagates the resulting state changes.
+     *
+     * @param decision optional APPROVED / REJECTED. When the just-completed
+     *                 TASK feeds a DECISION gateway, the decision picks
+     *                 which branch to keep (the others get discarded).
+     */
+    public CaseFileResponseDTO completeActivity(String activityInstanceId, String userId, String decision) {
+        log.info("[Workflow] completeActivity instance={} userId={} decision={}",
+                activityInstanceId, userId, decision);
         ActivityInstance instance = findInstanceOrThrow(activityInstanceId);
 
-        // State validation: only IN_PROGRESS activities can be completed
         if (!ACTIVITY_IN_PROGRESS.equals(instance.getEstado())) {
             throw new BadRequestException(
                     "Cannot complete activity: current status is '" + instance.getEstado()
                             + "'. Only IN_PROGRESS activities can be completed.");
         }
 
-        // Phase 5 — gate completion on the form when the activity declares one.
-        // Loaded eagerly because the activity is also needed below; reusing the
-        // same lookup avoids a second round-trip for the form check.
         Activity activityDef = activityRepository.findById(instance.getActividadId())
                 .orElseThrow(() -> new ResourceNotFoundException("Activity",
                         instance.getActividadId().toHexString()));
@@ -339,21 +361,30 @@ public class WorkflowEngineService {
         LocalDateTime now = LocalDateTime.now();
         ObjectId userObjectId = userId != null ? parseObjectId(userId, "userId") : null;
 
-        // Mark current activity as completed
         instance.setEstado(ACTIVITY_COMPLETED);
         instance.setFechaFin(now);
         activityInstanceRepository.save(instance);
-
-        // Record completion in history
         saveHistory(instance.getTramiteId(), instance.getActividadId(), userObjectId, ACTION_COMPLETED, now);
 
         Procedure caseFile = procedureRepository.findById(instance.getTramiteId())
                 .orElseThrow(() -> new ResourceNotFoundException("CaseFile",
                         instance.getTramiteId().toHexString()));
 
-        advanceFromCompleted(caseFile, instance.getActividadId(), userObjectId, now);
+        // Build a per-policy activity index once; reused by both the
+        // decision resolver and the unblock pass.
+        ObjectId policyId = activityDef.getPoliticaId();
+        Map<ObjectId, Activity> activitiesById = policyId == null
+                ? Collections.emptyMap()
+                : activityRepository.findByPoliticaId(policyId).stream()
+                        .collect(Collectors.toMap(Activity::getId, Function.identity()));
 
-        // Reload case file (status may have flipped to COMPLETED inside advance).
+        // 1. If the completed task fed a DECISION gateway, prune the rejected
+        //    branch first so its tasks don't get unblocked in the next step.
+        resolveDecisionBranches(caseFile, instance.getActividadId(), decision, activitiesById, now);
+
+        // 2. Promote freshly unblocked TASKs from BLOCKED → WAITING.
+        refreshDownstreamStates(caseFile, instance.getActividadId(), activitiesById, now);
+
         caseFile = procedureRepository.findById(caseFile.getId()).orElse(caseFile);
         return buildCaseFileResponse(caseFile);
     }
@@ -379,13 +410,11 @@ public class WorkflowEngineService {
         activityInstanceRepository.save(startInstance);
         saveHistory(caseFile.getId(), startActivity.getId(), userId, ACTION_COMPLETED, now);
 
-        advanceFromCompleted(caseFile, startActivity.getId(), userId, now);
-
-        // The cascade only walks reachable nodes from START. The product
-        // requires the operator Kanban to surface every TASK of the policy
-        // — even tasks the admin left disconnected on the canvas — so we
-        // run a second pass that materialises any orphan TASK that did
-        // not get an instance through the graph walk.
+        // Materialise every TASK of the policy with its initial state
+        // (WAITING for tasks with no upstream task, BLOCKED otherwise).
+        // The dependency-aware engine takes over from completeActivity()
+        // onward, unblocking tasks one branch at a time as predecessors
+        // finish.
         ObjectId policyId = startActivity.getPoliticaId();
         if (policyId == null && caseFile.getVersionPoliticaId() != null) {
             policyId = policyVersionRepository.findById(caseFile.getVersionPoliticaId())
@@ -396,16 +425,30 @@ public class WorkflowEngineService {
     }
 
     /**
-     * Creates a WAITING instance for every TASK of the policy that does NOT
-     * already have an instance attached to the given case. Used as a safety
-     * net for diagrams where the admin left tasks unconnected: the operator
-     * still needs to see them on the Kanban so they can claim and complete.
+     * Creates an instance for every TASK of the policy that doesn't have one
+     * yet. The initial estado depends on the graph of flows:
+     *
+     *   - WAITING   if the task has no upstream TASK predecessors (i.e. it
+     *               sits right after START, or is the only task in its
+     *               branch from START's point of view).
+     *   - BLOCKED   if at least one upstream TASK exists; the operator
+     *               sees it with a lock icon and can't claim it yet. As
+     *               those upstream tasks complete, the engine flips the
+     *               state to WAITING via {@link #refreshDownstreamStates}.
+     *
+     * DECISIONs are transparent for predecessor calculation: a TASK behind
+     * a DECISION inherits the predecessors of the gateway (i.e. whichever
+     * TASK precedes the DECISION) so it stays BLOCKED until the decision
+     * is taken upstream.
      */
     private void materialiseOrphanTasks(Procedure caseFile, ObjectId policyId,
                                         ObjectId userId, LocalDateTime now) {
         if (policyId == null) return;
         List<Activity> tasks = activityRepository.findByPoliticaIdAndTipo(policyId, "TASK");
         if (tasks.isEmpty()) return;
+
+        Map<ObjectId, Activity> activitiesById = activityRepository.findByPoliticaId(policyId).stream()
+                .collect(Collectors.toMap(Activity::getId, Function.identity()));
 
         Set<ObjectId> alreadyMaterialised = activityInstanceRepository
                 .findByTramiteId(caseFile.getId()).stream()
@@ -417,16 +460,247 @@ public class WorkflowEngineService {
             if (alreadyMaterialised.contains(task.getId())) {
                 continue;
             }
+            String initialState = hasUpstreamTaskPredecessor(task.getId(), activitiesById)
+                    ? ACTIVITY_BLOCKED
+                    : ACTIVITY_WAITING;
             activityInstanceRepository.save(ActivityInstance.builder()
                     .tramiteId(caseFile.getId())
                     .actividadId(task.getId())
-                    .estado(ACTIVITY_WAITING)
+                    .estado(initialState)
                     .assignedUserIds(resolveAssignees(task))
                     .createdAt(now)
                     .build());
             saveHistory(caseFile.getId(), task.getId(), userId, ACTION_TRANSITION, now);
-            log.info("Materialised orphan TASK {} ('{}') for caseFile {}",
-                    task.getId(), task.getNombre(), caseFile.getId());
+            log.info("Materialised TASK {} ('{}') as {} for caseFile {}",
+                    task.getId(), task.getNombre(), initialState, caseFile.getId());
+        }
+    }
+
+    /**
+     * True when there's at least one TASK upstream of {@code activityId}
+     * along the flow graph. DECISIONs are walked through transparently —
+     * we want the predecessor TASK that decides the gateway, not the
+     * gateway itself.
+     */
+    private boolean hasUpstreamTaskPredecessor(ObjectId activityId,
+                                               Map<ObjectId, Activity> activitiesById) {
+        Set<ObjectId> visited = new HashSet<>();
+        Deque<ObjectId> queue = new ArrayDeque<>();
+        queue.add(activityId);
+        while (!queue.isEmpty()) {
+            ObjectId current = queue.poll();
+            if (!visited.add(current)) continue;
+            List<Flow> incoming = flowRepository.findByActividadDestinoId(current);
+            for (Flow flow : incoming) {
+                ObjectId src = flow.getActividadOrigenId();
+                Activity srcAct = activitiesById.get(src);
+                if (srcAct == null) continue;
+                if ("TASK".equals(srcAct.getTipo())) return true;
+                if ("DECISION".equals(srcAct.getTipo())) {
+                    queue.add(src); // walk through the gateway
+                }
+                // START / END predecessors don't count as blockers.
+            }
+        }
+        return false;
+    }
+
+    /**
+     * After a TASK completes, looks at every TASK reachable downstream
+     * (walking through DECISIONs). For each one currently BLOCKED, checks
+     * if all of its TASK-level predecessors are now COMPLETED or
+     * DISCARDED — if so, flips it to WAITING so the operator can claim it.
+     */
+    private void refreshDownstreamStates(Procedure caseFile,
+                                         ObjectId completedActivityId,
+                                         Map<ObjectId, Activity> activitiesById,
+                                         LocalDateTime now) {
+        Map<ObjectId, ActivityInstance> instancesByActivity = activityInstanceRepository
+                .findByTramiteId(caseFile.getId()).stream()
+                .filter(i -> i.getActividadId() != null)
+                .collect(Collectors.toMap(ActivityInstance::getActividadId, Function.identity(),
+                        (a, b) -> a));
+
+        Set<ObjectId> visited = new HashSet<>();
+        Deque<ObjectId> queue = new ArrayDeque<>();
+        queue.add(completedActivityId);
+        while (!queue.isEmpty()) {
+            ObjectId current = queue.poll();
+            if (!visited.add(current)) continue;
+            for (Flow flow : flowRepository.findByActividadOrigenId(current)) {
+                ObjectId targetId = flow.getActividadDestinoId();
+                Activity target = activitiesById.get(targetId);
+                if (target == null) continue;
+                if ("TASK".equals(target.getTipo())) {
+                    ActivityInstance inst = instancesByActivity.get(targetId);
+                    if (inst != null
+                            && ACTIVITY_BLOCKED.equals(inst.getEstado())
+                            && allPredecessorsResolved(targetId, activitiesById, instancesByActivity)) {
+                        inst.setEstado(ACTIVITY_WAITING);
+                        activityInstanceRepository.save(inst);
+                        log.info("Unblocked TASK {} ('{}') on caseFile {}",
+                                targetId, target.getNombre(), caseFile.getId());
+                    }
+                } else if ("DECISION".equals(target.getTipo())) {
+                    queue.add(targetId);
+                }
+            }
+        }
+
+        // If every non-discarded instance of the case is COMPLETED, close it.
+        checkAndCompleteProcess(caseFile, now);
+    }
+
+    private boolean allPredecessorsResolved(ObjectId activityId,
+                                            Map<ObjectId, Activity> activitiesById,
+                                            Map<ObjectId, ActivityInstance> instancesByActivity) {
+        Set<ObjectId> visited = new HashSet<>();
+        Deque<ObjectId> queue = new ArrayDeque<>();
+        queue.add(activityId);
+        while (!queue.isEmpty()) {
+            ObjectId current = queue.poll();
+            if (!visited.add(current)) continue;
+            for (Flow flow : flowRepository.findByActividadDestinoId(current)) {
+                ObjectId src = flow.getActividadOrigenId();
+                Activity srcAct = activitiesById.get(src);
+                if (srcAct == null) continue;
+                if ("TASK".equals(srcAct.getTipo())) {
+                    ActivityInstance inst = instancesByActivity.get(src);
+                    if (inst == null) continue;
+                    String estado = inst.getEstado();
+                    if (!ACTIVITY_COMPLETED.equals(estado) && !ACTIVITY_DISCARDED.equals(estado)) {
+                        return false;
+                    }
+                } else if ("DECISION".equals(srcAct.getTipo())) {
+                    queue.add(src);
+                }
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Resolves a DECISION downstream of a just-completed TASK against the
+     * decision label the operator picked (APPROVED / REJECTED). Tasks on
+     * the chosen branch get a chance to unblock; tasks on the rejected
+     * branch (and everything reachable from them) are recursively marked
+     * DISCARDED so the operator never sees them.
+     *
+     * Fallback when the admin didn't label the gateway's branches: the
+     * first outgoing flow is treated as the APPROVED path and the rest as
+     * the REJECTED path. Order in {@code findByActividadOrigenId} is the
+     * insertion order of the flow rows, which matches how the designer
+     * wrote them out. The {@code workflow:branchLabel} extension is still
+     * the recommended way to disambiguate — this only kicks in if the
+     * admin didn't bother.
+     */
+    private void resolveDecisionBranches(Procedure caseFile,
+                                         ObjectId taskJustCompletedId,
+                                         String decision,
+                                         Map<ObjectId, Activity> activitiesById,
+                                         LocalDateTime now) {
+        if (decision == null || decision.isBlank()) {
+            log.info("[Workflow] decision empty — gateway resolution skipped");
+            return;
+        }
+
+        Map<ObjectId, ActivityInstance> instancesByActivity = activityInstanceRepository
+                .findByTramiteId(caseFile.getId()).stream()
+                .filter(i -> i.getActividadId() != null)
+                .collect(Collectors.toMap(ActivityInstance::getActividadId, Function.identity(),
+                        (a, b) -> a));
+
+        for (Flow toGateway : flowRepository.findByActividadOrigenId(taskJustCompletedId)) {
+            Activity gateway = activitiesById.get(toGateway.getActividadDestinoId());
+            if (gateway == null || !"DECISION".equals(gateway.getTipo())) continue;
+
+            List<Flow> branches = flowRepository.findByActividadOrigenId(gateway.getId());
+            boolean anyLabelled = branches.stream()
+                    .anyMatch(f -> f.getBranchLabel() != null && !f.getBranchLabel().isBlank());
+
+            if (anyLabelled) {
+                for (Flow branchFlow : branches) {
+                    String label = branchFlow.getBranchLabel();
+                    // Branches without a label are kept (couldn't tell what
+                    // they are without admin input).
+                    if (label == null || label.isBlank()) continue;
+                    if (!matchesDecision(label, decision)) {
+                        log.info("[Workflow] discarding branch '{}' on gateway {} (decision={})",
+                                label, gateway.getId(), decision);
+                        discardChain(branchFlow.getActividadDestinoId(), activitiesById,
+                                instancesByActivity, now, caseFile);
+                    }
+                }
+            } else if (branches.size() > 1) {
+                // Fallback: first flow = APPROVED branch, rest = REJECTED.
+                log.warn("[Workflow] gateway {} has no labelled branches — falling back to "
+                        + "'first flow = APPROVED'", gateway.getId());
+                boolean approved = "APPROVED".equalsIgnoreCase(decision)
+                        || "APROBADO".equalsIgnoreCase(decision)
+                        || "SI".equalsIgnoreCase(decision);
+                for (int i = 0; i < branches.size(); i++) {
+                    boolean keep = (approved && i == 0) || (!approved && i != 0);
+                    if (!keep) {
+                        log.info("[Workflow] discarding fallback branch index {} on gateway {} (decision={})",
+                                i, gateway.getId(), decision);
+                        discardChain(branches.get(i).getActividadDestinoId(), activitiesById,
+                                instancesByActivity, now, caseFile);
+                    }
+                }
+            }
+        }
+    }
+
+    private boolean matchesDecision(String branchLabel, String decision) {
+        if (branchLabel == null || decision == null) return false;
+        // Equate APPROVED ↔ APROBADO / SI / YES; REJECTED ↔ RECHAZADO / NO.
+        String norm = branchLabel.trim().toUpperCase();
+        String dec = decision.trim().toUpperCase();
+        if (norm.equals(dec)) return true;
+        if (dec.equals("APPROVED") &&
+                (norm.equals("APROBADO") || norm.equals("SI") || norm.equals("SÍ") || norm.equals("YES"))) {
+            return true;
+        }
+        if (dec.equals("REJECTED") &&
+                (norm.equals("RECHAZADO") || norm.equals("NO"))) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Walks downstream from {@code startId} marking every BLOCKED/WAITING
+     * task as DISCARDED. Stops at END nodes; transparent on DECISIONs.
+     */
+    private void discardChain(ObjectId startId,
+                              Map<ObjectId, Activity> activitiesById,
+                              Map<ObjectId, ActivityInstance> instancesByActivity,
+                              LocalDateTime now,
+                              Procedure caseFile) {
+        Set<ObjectId> visited = new HashSet<>();
+        Deque<ObjectId> queue = new ArrayDeque<>();
+        queue.add(startId);
+        while (!queue.isEmpty()) {
+            ObjectId current = queue.poll();
+            if (!visited.add(current)) continue;
+            Activity act = activitiesById.get(current);
+            if (act == null) continue;
+            if ("END".equals(act.getTipo())) continue;
+            if ("TASK".equals(act.getTipo())) {
+                ActivityInstance inst = instancesByActivity.get(current);
+                if (inst != null
+                        && (ACTIVITY_BLOCKED.equals(inst.getEstado())
+                            || ACTIVITY_WAITING.equals(inst.getEstado()))) {
+                    inst.setEstado(ACTIVITY_DISCARDED);
+                    inst.setFechaFin(now);
+                    activityInstanceRepository.save(inst);
+                    log.info("Discarded TASK {} ('{}') on caseFile {}",
+                            current, act.getNombre(), caseFile.getId());
+                }
+            }
+            for (Flow flow : flowRepository.findByActividadOrigenId(current)) {
+                queue.add(flow.getActividadDestinoId());
+            }
         }
     }
 
@@ -662,9 +936,13 @@ public class WorkflowEngineService {
      * If so, marks the case file as COMPLETED.
      */
     private void checkAndCompleteProcess(Procedure caseFile, LocalDateTime now) {
+        // The case is done when there's nothing left to act on. Discarded
+        // instances (rejected gateway branches) are considered terminal
+        // for completion purposes — the operator never has to touch them.
         List<ActivityInstance> pendingInstances = activityInstanceRepository
                 .findByTramiteId(caseFile.getId()).stream()
-                .filter(i -> !ACTIVITY_COMPLETED.equals(i.getEstado()))
+                .filter(i -> !ACTIVITY_COMPLETED.equals(i.getEstado())
+                        && !ACTIVITY_DISCARDED.equals(i.getEstado()))
                 .toList();
 
         if (pendingInstances.isEmpty()) {

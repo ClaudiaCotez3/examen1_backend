@@ -207,13 +207,29 @@ public class BusinessPolicyService {
      * id. Steps:
      *   1) validate the new graph
      *   2) update policy metadata (name / description / status / bpmn xml)
-     *   3) wipe existing lanes / activities / flows for this policy
-     *   4) re-insert the incoming graph
-     *   5) mint a new version snapshot
+     *   3) capture old activity ids by name (for instance remapping)
+     *   4) wipe existing lanes / activities / flows for this policy
+     *   5) re-insert the incoming graph
+     *   6) remap existing trámite instances to the new activity ids by name
+     *      so the operator Kanban keeps showing the right área / nombre
+     *      after an update
+     *   7) mint a new version snapshot
      */
     public BusinessPolicyResponseDTO updateFullPolicyStructure(String id, BusinessPolicyRequestDTO request) {
         validateGraph(request);
         BusinessPolicy policy = findPolicyOrThrow(id);
+
+        // Snapshot the old activity → name index BEFORE we drop the graph,
+        // so we can rebind in-flight instances to whatever we recreate.
+        // Keyed by old activityId because that's what ActivityInstance
+        // documents store.
+        Map<ObjectId, String> oldActivityNameById = new HashMap<>();
+        for (Activity old : activityRepository.findByPoliticaId(policy.getId())) {
+            String name = old.getNombre() == null ? "" : old.getNombre().trim();
+            if (!name.isEmpty()) {
+                oldActivityNameById.put(old.getId(), name);
+            }
+        }
 
         policyMapper.updateEntity(policy, request);
         if (request.getStatus() != null) {
@@ -225,8 +241,65 @@ public class BusinessPolicyService {
         deleteGraph(savedPolicy.getId());
         persistGraph(savedPolicy, request);
 
+        remapInstancesAfterRebuild(savedPolicy.getId(), oldActivityNameById);
+
         policyVersionService.createSnapshot(savedPolicy.getId(), savedPolicy.getBpmnXml());
         return buildFullResponse(savedPolicy);
+    }
+
+    /**
+     * After {@link #deleteGraph} + {@link #persistGraph} run, every
+     * ActivityInstance for a trámite of this policy still points to a
+     * deleted activityId. Walk all such instances and re-bind them to the
+     * freshly inserted activity that matches by name. Keeps the operator
+     * Kanban consistent (right área, right activity name) without forcing
+     * the consultor to relaunch every in-flight trámite.
+     *
+     * Instances whose old name doesn't match any new activity are left
+     * pointing at the dangling id; the orphan-cleanup sweep will collect
+     * them on the next startup.
+     */
+    private void remapInstancesAfterRebuild(ObjectId policyId,
+                                            Map<ObjectId, String> oldActivityNameById) {
+        if (oldActivityNameById.isEmpty()) return;
+
+        Map<String, ObjectId> newActivityIdByName = new HashMap<>();
+        for (Activity fresh : activityRepository.findByPoliticaId(policyId)) {
+            String name = fresh.getNombre() == null ? "" : fresh.getNombre().trim();
+            if (!name.isEmpty()) {
+                newActivityIdByName.putIfAbsent(name, fresh.getId());
+            }
+        }
+        if (newActivityIdByName.isEmpty()) return;
+
+        // Resolve every procedure of this policy via its versions.
+        List<ObjectId> versionIds = policyVersionRepository
+                .findByPoliticaIdOrderByNumeroVersionDesc(policyId).stream()
+                .map(com.example.backend.model.PolicyVersion::getId)
+                .toList();
+        if (versionIds.isEmpty()) return;
+
+        List<Procedure> procedures = new ArrayList<>();
+        for (ObjectId vId : versionIds) {
+            procedures.addAll(procedureRepository.findByVersionPoliticaIdAndEstado(vId, "activo"));
+            procedures.addAll(procedureRepository.findByVersionPoliticaIdAndEstado(vId, "finalizado"));
+        }
+
+        int rebound = 0;
+        for (Procedure procedure : procedures) {
+            for (com.example.backend.model.ActivityInstance inst :
+                    activityInstanceRepository.findByTramiteId(procedure.getId())) {
+                String oldName = oldActivityNameById.get(inst.getActividadId());
+                if (oldName == null) continue;
+                ObjectId newId = newActivityIdByName.get(oldName);
+                if (newId == null || newId.equals(inst.getActividadId())) continue;
+                inst.setActividadId(newId);
+                activityInstanceRepository.save(inst);
+                rebound++;
+            }
+        }
+        log.info("Policy {} updated: remapped {} instance(s) to new activity ids",
+                policyId.toHexString(), rebound);
     }
 
     /**
@@ -370,6 +443,16 @@ public class BusinessPolicyService {
         List<LaneRequestDTO> lanes = request.getLanes();
         List<ActivityRequestDTO> activities = request.getActivities();
         List<FlowRequestDTO> flows = request.getFlows();
+
+        // Start form is mandatory: the consultor must always have a form
+        // to fill before launching a trámite, and the runtime depends on
+        // it to capture customer data.
+        if (request.getStartFormDefinition() == null
+                || request.getStartFormDefinition().getFields() == null
+                || request.getStartFormDefinition().getFields().isEmpty()) {
+            throw new BadRequestException(
+                    "La política debe declarar un formulario inicial con al menos un campo");
+        }
 
         if (lanes == null || lanes.isEmpty()) {
             throw new BadRequestException("Policy must contain at least one lane");

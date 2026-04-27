@@ -67,6 +67,10 @@ public class SecurityConfig {
                         // Public (only login is fully open; /me and /register require auth + role)
                         .requestMatchers("/api/auth/login").permitAll()
                         .requestMatchers("/error").permitAll()
+                        // STOMP handshake endpoint. Auth happens at the
+                        // STOMP CONNECT frame via StompJwtChannelInterceptor,
+                        // not at the HTTP upgrade.
+                        .requestMatchers("/ws/policies/**").permitAll()
 
                         // Role-segmented namespaces
                         .requestMatchers("/api/admin/**").hasRole(RoleName.ADMIN)

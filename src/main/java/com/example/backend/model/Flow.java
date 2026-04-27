@@ -40,4 +40,13 @@ public class Flow {
     private String tipo;
 
     private String condicion;
+
+    /**
+     * Human-readable label the admin attached to a branch coming out of
+     * a DECISION gateway (e.g. "APROBADO" / "RECHAZADO" or any free text).
+     * Null for non-conditional flows. The operator's approval modal
+     * surfaces these labels so the decision UI matches the diagram.
+     */
+    @Field("etiqueta_rama")
+    private String branchLabel;
 }

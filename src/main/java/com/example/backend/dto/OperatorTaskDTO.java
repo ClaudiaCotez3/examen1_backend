@@ -59,4 +59,13 @@ public class OperatorTaskDTO {
     private LocalDateTime createdAt;
     private LocalDateTime startedAt;
     private LocalDateTime finishedAt;
+
+    /**
+     * True when the activity feeds a DECISION gateway directly (its
+     * outgoing flow lands on a {@code tipo == DECISION} node). The
+     * operator UI uses this to follow up the form submission with the
+     * Aprobar / Rechazar dialog so the engine can decide which branch
+     * to keep.
+     */
+    private boolean requiresDecision;
 }

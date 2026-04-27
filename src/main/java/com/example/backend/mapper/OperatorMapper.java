@@ -72,6 +72,8 @@ public class OperatorMapper {
             case "en_espera" -> "WAITING";
             case "en_proceso" -> "IN_PROGRESS";
             case "finalizado" -> "COMPLETED";
+            case "bloqueada" -> "BLOCKED";
+            case "descartada" -> "DISCARDED";
             default -> estado;
         };
     }

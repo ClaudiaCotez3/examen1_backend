@@ -1,5 +1,6 @@
 package com.example.backend.controller;
 
+import com.example.backend.dto.CaseStartFormDTO;
 import com.example.backend.dto.OperatorTaskDTO;
 import com.example.backend.dto.OperatorTasksResponseDTO;
 import com.example.backend.service.OperatorService;
@@ -43,5 +44,16 @@ public class OperatorController {
             @PathVariable String id,
             @RequestParam String userId) {
         return ResponseEntity.ok(operatorService.assignActivity(id, userId));
+    }
+
+    /**
+     * Customer-info panel for a task: returns the start form snapshot of the
+     * trámite the task belongs to. The operator's task modal lazy-loads it
+     * when the user clicks "Ver info. del cliente" so the regular Kanban
+     * payload stays small.
+     */
+    @GetMapping("/cases/{caseId}/start-form")
+    public ResponseEntity<CaseStartFormDTO> getCaseStartForm(@PathVariable String caseId) {
+        return ResponseEntity.ok(operatorService.getCaseStartForm(caseId));
     }
 }
