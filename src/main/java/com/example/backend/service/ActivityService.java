@@ -21,7 +21,7 @@ import java.util.Set;
 @RequiredArgsConstructor
 public class ActivityService {
 
-    private static final Set<String> VALID_TYPES = Set.of("START", "TASK", "DECISION", "END");
+    private static final Set<String> VALID_TYPES = Set.of("START", "TASK", "DECISION", "PARALLEL", "END");
 
     private final ActivityRepository activityRepository;
     private final LaneRepository laneRepository;

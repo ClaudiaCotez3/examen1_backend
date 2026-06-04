@@ -56,7 +56,7 @@ public class BusinessPolicyService {
     private static final String STATUS_ARCHIVED = "ARCHIVED";
     private static final Set<String> ALLOWED_STATUSES = Set.of(STATUS_DRAFT, STATUS_ACTIVE);
 
-    private static final Set<String> ACTIVITY_TYPES = Set.of("START", "TASK", "DECISION", "END");
+    private static final Set<String> ACTIVITY_TYPES = Set.of("START", "TASK", "DECISION", "PARALLEL", "END");
     private static final Set<String> FLOW_TYPES = Set.of("LINEAR", "CONDITIONAL", "PARALLEL", "LOOP");
 
     private final BusinessPolicyRepository policyRepository;

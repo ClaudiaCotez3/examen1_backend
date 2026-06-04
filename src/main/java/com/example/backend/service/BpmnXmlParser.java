@@ -216,6 +216,9 @@ public class BpmnXmlParser {
     private String classifyActivityType(String localName) {
         if ("startEvent".equals(localName)) return "START";
         if ("endEvent".equals(localName)) return "END";
+        // Parallel (AND) gateway gets its own type so the engine forks/joins
+        // all branches; every other gateway is an exclusive DECISION (XOR).
+        if ("parallelGateway".equals(localName)) return "PARALLEL";
         if (GATEWAY_NODES.contains(localName)) return "DECISION";
         if (TASK_NODES.contains(localName)) return "TASK";
         return null;
@@ -259,9 +262,15 @@ public class BpmnXmlParser {
             // when the source is a gateway (decision branches are inherently
             // conditional). LINEAR otherwise.
             boolean hasCondition = flow.getElementsByTagNameNS(NS_BPMN, "conditionExpression").getLength() > 0;
-            String type = (hasCondition || "DECISION".equals(typeByClientId.get(source)))
-                    ? "CONDITIONAL"
-                    : "LINEAR";
+            String sourceType = typeByClientId.get(source);
+            String type;
+            if ("PARALLEL".equals(sourceType)) {
+                type = "PARALLEL";
+            } else if (hasCondition || "DECISION".equals(sourceType)) {
+                type = "CONDITIONAL";
+            } else {
+                type = "LINEAR";
+            }
 
             flows.add(FlowRequestDTO.builder()
                     .sourceRef(source)

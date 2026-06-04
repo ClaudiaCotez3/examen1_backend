@@ -496,8 +496,8 @@ public class WorkflowEngineService {
                 Activity srcAct = activitiesById.get(src);
                 if (srcAct == null) continue;
                 if ("TASK".equals(srcAct.getTipo())) return true;
-                if ("DECISION".equals(srcAct.getTipo())) {
-                    queue.add(src); // walk through the gateway
+                if (isGatewayType(srcAct.getTipo())) {
+                    queue.add(src); // walk through the gateway (DECISION or PARALLEL)
                 }
                 // START / END predecessors don't count as blockers.
             }
@@ -541,8 +541,8 @@ public class WorkflowEngineService {
                         log.info("Unblocked TASK {} ('{}') on caseFile {}",
                                 targetId, target.getNombre(), caseFile.getId());
                     }
-                } else if ("DECISION".equals(target.getTipo())) {
-                    queue.add(targetId);
+                } else if (isGatewayType(target.getTipo())) {
+                    queue.add(targetId); // walk through gateway (DECISION or PARALLEL fork)
                 }
             }
         }
@@ -571,7 +571,10 @@ public class WorkflowEngineService {
                     if (!ACTIVITY_COMPLETED.equals(estado) && !ACTIVITY_DISCARDED.equals(estado)) {
                         return false;
                     }
-                } else if ("DECISION".equals(srcAct.getTipo())) {
+                } else if (isGatewayType(srcAct.getTipo())) {
+                    // Walk through gateways. For a PARALLEL join this naturally
+                    // requires EVERY upstream branch task to be resolved before
+                    // the downstream task unblocks (AND-join semantics).
                     queue.add(src);
                 }
             }
@@ -766,14 +769,14 @@ public class WorkflowEngineService {
                 // Pre-materialise every reachable TASK so they all show up
                 // on the operator Kanban at once.
                 cascadeAdvance(caseFile, next.getId(), userId, now, visited);
-            } else if ("DECISION".equals(next.getTipo())) {
-                // Gateways are logical nodes that no operator works on. Mark
-                // the gateway instance completed in place and continue the
-                // cascade through ALL of its outgoing branches so the TASKs
-                // sitting behind the decision still surface to their
-                // assignees up front. This prioritises "operator sees every
-                // task they own" over strict BPMN branch evaluation, which
-                // is what the product requires.
+            } else if (isGatewayType(next.getTipo())) {
+                // Gateways (DECISION or PARALLEL) are logical nodes that no
+                // operator works on. Mark the gateway instance completed in
+                // place and continue the cascade through ALL of its outgoing
+                // branches so the TASKs sitting behind the gateway still
+                // surface to their assignees up front. This prioritises
+                // "operator sees every task they own" over strict BPMN branch
+                // evaluation, which is what the product requires.
                 if (!ACTIVITY_COMPLETED.equals(nextInstance.getEstado())) {
                     nextInstance.setEstado(ACTIVITY_COMPLETED);
                     nextInstance.setFechaInicio(now);
@@ -968,6 +971,22 @@ public class WorkflowEngineService {
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────
+
+    /**
+     * Gateways are logical, instance-less nodes the engine walks THROUGH when
+     * computing predecessors / successors. Both the exclusive (DECISION) and
+     * the parallel (PARALLEL) gateway are transparent for graph traversal.
+     *
+     * The difference between them lives elsewhere:
+     *   - DECISION branches get pruned by {@link #resolveDecisionBranches}
+     *     (one branch kept, the rest DISCARDED) and force the operator to pick
+     *     APPROVED/REJECTED ({@code requiresDecision} in OperatorService).
+     *   - PARALLEL is never pruned and never asks for a decision, so a fork
+     *     unblocks ALL branches and a join waits for EVERY branch.
+     */
+    private boolean isGatewayType(String tipo) {
+        return "DECISION".equals(tipo) || "PARALLEL".equals(tipo);
+    }
 
     private ActivityInstance findInstanceOrThrow(String activityInstanceId) {
         ObjectId objectId = parseObjectId(activityInstanceId, "activityInstanceId");
