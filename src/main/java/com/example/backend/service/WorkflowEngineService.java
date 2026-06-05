@@ -93,6 +93,8 @@ public class WorkflowEngineService {
     private final ProcedureHistoryRepository procedureHistoryRepository;
     private final MongoTemplate mongoTemplate;
     private final FormService formService;
+    private final CaseDocumentService caseDocumentService;
+    private final CustomerResolutionService customerResolutionService;
 
     private final CaseFileMapper caseFileMapper;
     private final ActivityInstanceMapper activityInstanceMapper;
@@ -189,6 +191,13 @@ public class WorkflowEngineService {
                 .findFirst()
                 .orElseThrow(() -> new BadRequestException("Policy has no START activity defined"));
 
+        // Opción B: customer identity is resolved ONCE, here at write time
+        // (find-or-create by the reserved cliente_email / cliente_ci fields).
+        // Downstream consumers (Repositorio, reportes, analítica) join by
+        // cliente_id instead of re-running heuristics per read.
+        ObjectId clienteId = customerResolutionService
+                .resolveOrCreate(request.getStartFormData());
+
         LocalDateTime now = LocalDateTime.now();
         Procedure caseFile = procedureRepository.save(Procedure.builder()
                 .codigo(generateCaseCode())
@@ -196,7 +205,18 @@ public class WorkflowEngineService {
                 .estado(STATUS_ACTIVE)
                 .fechaInicio(now)
                 .startFormData(request.getStartFormData())
+                .clienteId(clienteId)
                 .build());
+
+        // Gestión Documental (TAREA 4): the case IS a digital expediente from
+        // birth — every attachment declared on the start form is registered
+        // as a document of the trámite (metadata now, binary attachable later).
+        try {
+            caseDocumentService.registerStartFormDocuments(caseFile, policy.getStartFormDefinition());
+        } catch (Exception e) {
+            // Never break case creation because of the documental side-channel.
+            log.warn("Could not register start-form documents for case {}", caseFile.getId(), e);
+        }
 
         ActivityInstance startInstance = activityInstanceRepository.save(ActivityInstance.builder()
                 .tramiteId(caseFile.getId())

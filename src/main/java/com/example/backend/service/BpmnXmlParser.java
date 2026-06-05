@@ -63,6 +63,8 @@ public class BpmnXmlParser {
     private static final String ATTR_FORM_ID = "workflow:formId";
     private static final String ATTR_ASSIGNED_USER = "workflow:assignedUserId";
     private static final String ATTR_REQUIREMENTS = "workflow:requirements";
+    /** Gestión Documental — "Acceso a documentos" (LECTOR/READER | EDITOR). */
+    private static final String ATTR_DOCUMENT_ACCESS = "workflow:documentAccess";
 
     /** BPMN local-name → activity type buckets. */
     private static final Set<String> TASK_NODES = Set.of(
@@ -236,6 +238,8 @@ public class BpmnXmlParser {
         readAttr(el, ATTR_REQUIREMENTS).ifPresent(raw -> activity.setRequirements(parseStringList(raw)));
         // formId presence flips requiresForm; we don't resolve the catalog here.
         readAttr(el, ATTR_FORM_ID).ifPresent(raw -> activity.setRequiresForm(true));
+        // Gestión Documental: normalization (LECTOR→READER) happens in ActivityMapper.
+        readAttr(el, ATTR_DOCUMENT_ACCESS).ifPresent(activity::setDocumentAccess);
     }
 
     // ── Flows ──────────────────────────────────────────────────────────

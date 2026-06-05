@@ -20,6 +20,10 @@ public class ActivityMapper {
     );
     private static final String DEFAULT_ASSIGNMENT_TYPE = "DEPARTMENT";
 
+    /** Gestión Documental access levels persisted on the activity. */
+    private static final String DOC_ACCESS_READER = "READER";
+    private static final String DOC_ACCESS_EDITOR = "EDITOR";
+
     private final FormMapper formMapper;
 
     public Activity toEntity(ActivityRequestDTO dto, ObjectId policyId, ObjectId laneId) {
@@ -35,6 +39,7 @@ public class ActivityMapper {
                 .formId(parseObjectIdOrNull(dto.getFormId()))
                 .formDefinition(formMapper.toEntity(dto.getFormDefinition()))
                 .assignedUserIds(resolveAssignees(dto))
+                .documentAccess(resolveDocumentAccess(dto.getType(), dto.getDocumentAccess()))
                 .build();
     }
 
@@ -50,6 +55,7 @@ public class ActivityMapper {
                 .formId(activity.getFormId() != null ? activity.getFormId().toHexString() : null)
                 .formDefinition(formMapper.toDefinitionDTO(activity.getFormDefinition()))
                 .assignedUserIds(copyOrEmpty(activity.getAssignedUserIds()))
+                .documentAccess(activity.getDocumentAccess())
                 .build();
     }
 
@@ -79,6 +85,24 @@ public class ActivityMapper {
         if (isBlank(raw)) return DEFAULT_ASSIGNMENT_TYPE;
         String trimmed = raw.trim();
         return ASSIGNMENT_TYPES.contains(trimmed) ? trimmed : DEFAULT_ASSIGNMENT_TYPE;
+    }
+
+    /**
+     * Normalizes the Gestión Documental access level. Only tasks carry it —
+     * other node types get null. The Angular designer sends the Spanish
+     * aliases (LECTOR / EDITOR); we persist the canonical English enum
+     * (READER / EDITOR). Unknown values fall back to READER so a misbehaving
+     * client can never escalate permissions by accident.
+     */
+    private String resolveDocumentAccess(String activityType, String raw) {
+        if (!"TASK".equals(activityType)) return null;
+        if (isBlank(raw)) return DOC_ACCESS_READER;
+        String normalized = raw.trim().toUpperCase();
+        return switch (normalized) {
+            case DOC_ACCESS_EDITOR -> DOC_ACCESS_EDITOR;
+            case DOC_ACCESS_READER, "LECTOR" -> DOC_ACCESS_READER;
+            default -> DOC_ACCESS_READER;
+        };
     }
 
     private ObjectId parseObjectIdOrNull(String raw) {

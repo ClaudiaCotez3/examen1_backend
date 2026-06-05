@@ -26,4 +26,6 @@ public class ActivityResponseDTO {
     private String formId;
     private FormDefinitionDTO formDefinition;
     private List<String> assignedUserIds;
+    /** READER | EDITOR — document access over the expediente (null for non-TASK nodes). */
+    private String documentAccess;
 }

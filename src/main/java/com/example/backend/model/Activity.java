@@ -82,4 +82,16 @@ public class Activity {
      */
     @Field("usuarios_asignados")
     private List<String> assignedUserIds;
+
+    /**
+     * Gestión Documental — document-access level the operator working THIS
+     * activity gets over the trámite's expediente:
+     *   - READER → view + download documents.
+     *   - EDITOR → view + download + upload + update documents.
+     * Only meaningful for {@code tipo == TASK}; null for START/END/DECISION.
+     * Authored in the policy designer ("Acceso a documentos") and persisted
+     * with the policy. Defaults to READER when never configured.
+     */
+    @Field("acceso_documentos")
+    private String documentAccess;
 }

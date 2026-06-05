@@ -70,4 +70,12 @@ public class ActivityRequestDTO {
      * operators at runtime as a checklist; the engine does not enforce them.
      */
     private List<String> requirements;
+
+    /**
+     * Gestión Documental — access level over the trámite's expediente while
+     * working this activity. Accepted values: READER | EDITOR (the Spanish
+     * designer aliases LECTOR is normalized to READER server-side).
+     * Only meaningful for {@code type == "TASK"}; defaults to READER.
+     */
+    private String documentAccess;
 }

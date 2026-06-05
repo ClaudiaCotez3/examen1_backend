@@ -187,9 +187,19 @@ public class FormService {
     private String validateType(FormFieldDefinition field, Object value) {
         String type = field.getType() == null ? "text" : field.getType().toLowerCase();
         switch (type) {
-            case "text", "file" -> {
+            case "text" -> {
                 if (!(value instanceof String)) {
                     return "Field '" + field.getName() + "' must be a string";
+                }
+            }
+            case "file" -> {
+                // The Angular dynamic form sends file fields as a list of
+                // metadata objects ([{name,size,type}]) — the binaries travel
+                // separately to the expediente documental. Legacy clients may
+                // still send a plain string (URI/reference), so accept both.
+                // Mirrors StartFormValidator's handling of the same type.
+                if (!(value instanceof java.util.Collection<?>) && !(value instanceof String)) {
+                    return "Field '" + field.getName() + "' must be a list of files";
                 }
             }
             case "number" -> {

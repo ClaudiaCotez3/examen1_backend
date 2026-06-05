@@ -42,6 +42,17 @@ public class Procedure {
     @Field("start_form_data")
     private Map<String, Object> startFormData;
 
+    /**
+     * First-class link to the {@link Customer} this trámite belongs to.
+     * Resolved ONCE at case creation (find-or-create by the reserved
+     * cliente_email / cliente_ci start-form fields); legacy cases are
+     * linked retroactively by the startup backfill. Null when the case
+     * predates start-forms and carries no identifiable customer data.
+     */
+    @Indexed
+    @Field("cliente_id")
+    private ObjectId clienteId;
+
     @Field("fecha_inicio")
     private LocalDateTime fechaInicio;
 

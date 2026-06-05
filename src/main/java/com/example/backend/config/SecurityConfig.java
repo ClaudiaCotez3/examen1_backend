@@ -67,6 +67,13 @@ public class SecurityConfig {
                         // Public (only login is fully open; /me and /register require auth + role)
                         .requestMatchers("/api/auth/login").permitAll()
                         .requestMatchers("/error").permitAll()
+                        // Portal móvil del CLIENTE (app Flutter). Los clientes
+                        // no son Users del sistema: cada endpoint exige y
+                        // valida el par correo + CI contra la colección
+                        // `clientes` (MobilePortalService.authenticate), así
+                        // que permitAll aquí NO significa acceso anónimo a
+                        // datos — sin credenciales correctas todo responde 400.
+                        .requestMatchers("/api/mobile/**").permitAll()
                         // STOMP handshake endpoint. Auth happens at the
                         // STOMP CONNECT frame via StompJwtChannelInterceptor,
                         // not at the HTTP upgrade.
