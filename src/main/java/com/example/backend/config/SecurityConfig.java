@@ -74,6 +74,13 @@ public class SecurityConfig {
                         // que permitAll aquí NO significa acceso anónimo a
                         // datos — sin credenciales correctas todo responde 400.
                         .requestMatchers("/api/mobile/**").permitAll()
+                        // OnlyOffice Document Server (server-to-server). El DS
+                        // no porta el JWT de usuarios: cada request trae un
+                        // token firmado de propósito único (secreto propio de
+                        // OnlyOffice) validado en OnlyOfficeController — sin
+                        // token válido todo responde 401/400.
+                        .requestMatchers("/api/onlyoffice/download",
+                                "/api/onlyoffice/callback").permitAll()
                         // STOMP handshake endpoint. Auth happens at the
                         // STOMP CONNECT frame via StompJwtChannelInterceptor,
                         // not at the HTTP upgrade.

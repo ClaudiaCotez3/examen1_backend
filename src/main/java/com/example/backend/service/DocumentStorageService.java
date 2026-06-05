@@ -64,6 +64,29 @@ public class DocumentStorageService {
         return root.relativize(target).toString().replace('\\', '/');
     }
 
+    /**
+     * Variante para integraciones server-to-server (OnlyOffice callback):
+     * persiste bytes ya descargados en lugar de un MultipartFile. Misma
+     * convención de rutas/versionado que {@link #store}.
+     */
+    public String storeBytes(String tramiteId, String documentId, int version,
+                             String originalFileName, byte[] bytes) {
+        if (bytes == null || bytes.length == 0) {
+            throw new BadRequestException("File content is required");
+        }
+        String safeName = sanitize(originalFileName);
+        Path caseDir = root.resolve(tramiteId);
+        Path target = caseDir.resolve(documentId + "_v" + version + "_" + safeName);
+        try {
+            Files.createDirectories(caseDir);
+            Files.write(target, bytes);
+        } catch (IOException e) {
+            log.error("Failed to store document bytes {} for case {}", documentId, tramiteId, e);
+            throw new UncheckedIOException("Failed to store document", e);
+        }
+        return root.relativize(target).toString().replace('\\', '/');
+    }
+
     /** Loads a previously stored binary by its relative path. */
     public byte[] load(String relativePath) {
         Path resolved = resolveSafely(relativePath);

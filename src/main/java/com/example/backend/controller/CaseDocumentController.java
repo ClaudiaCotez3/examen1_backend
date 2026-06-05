@@ -2,10 +2,12 @@ package com.example.backend.controller;
 
 import com.example.backend.dto.CaseDocumentDTO;
 import com.example.backend.dto.DocumentAuditDTO;
+import com.example.backend.dto.DocumentVersionDTO;
 import com.example.backend.dto.ExpedienteDTO;
 import com.example.backend.security.CustomUserDetails;
 import com.example.backend.service.CaseDocumentService;
 import com.example.backend.service.CaseDocumentService.DocumentContent;
+import com.example.backend.service.OnlyOfficeService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
@@ -18,6 +20,7 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Gestión Documental — REST API of the digital expediente (TAREAS 5 y 7).
@@ -42,6 +45,7 @@ import java.util.List;
 public class CaseDocumentController {
 
     private final CaseDocumentService caseDocumentService;
+    private final OnlyOfficeService onlyOfficeService;
 
     /** TAREA 7 — full expediente aggregate feeding the "Expediente" screen. */
     @GetMapping("/expediente")
@@ -72,15 +76,56 @@ public class CaseDocumentController {
         return ResponseEntity.status(HttpStatus.CREATED).body(stored);
     }
 
-    /** Replaces a document's content with a new version (requires EDITOR). */
+    /**
+     * "Editar documento": reemplaza el contenido con la versión editada
+     * (flujo descargar → editar localmente → subir), registrando la nota
+     * de cambio en la bitácora. Requiere EDITOR.
+     */
     @PutMapping(value = "/documents/{documentId}", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<CaseDocumentDTO> updateDocument(
             @PathVariable String caseFileId,
             @PathVariable String documentId,
             @RequestParam("file") MultipartFile file,
+            @RequestParam(value = "note", required = false) String note,
             @AuthenticationPrincipal CustomUserDetails caller) {
         return ResponseEntity.ok(
-                caseDocumentService.updateDocument(caseFileId, documentId, file, caller));
+                caseDocumentService.updateDocument(caseFileId, documentId, file, note, caller));
+    }
+
+    /**
+     * Configuración firmada de DocsAPI.DocEditor (OnlyOffice) para editar
+     * o ver el documento. Autenticado con la sesión normal del usuario:
+     * el modo (edit/view) deriva de los permisos READER/EDITOR existentes.
+     */
+    @GetMapping("/documents/{documentId}/onlyoffice-config")
+    public ResponseEntity<Map<String, Object>> getOnlyOfficeConfig(
+            @PathVariable String caseFileId,
+            @PathVariable String documentId,
+            @AuthenticationPrincipal CustomUserDetails caller) {
+        return ResponseEntity.ok(
+                onlyOfficeService.buildEditorConfig(caseFileId, documentId, caller));
+    }
+
+    /** Bitácora por documento: historial completo de versiones. */
+    @GetMapping("/documents/{documentId}/versions")
+    public ResponseEntity<List<DocumentVersionDTO>> getDocumentVersions(
+            @PathVariable String caseFileId,
+            @PathVariable String documentId,
+            @AuthenticationPrincipal CustomUserDetails caller) {
+        return ResponseEntity.ok(
+                caseDocumentService.getDocumentVersions(caseFileId, documentId, caller));
+    }
+
+    /** Descarga el binario de una versión histórica (audita DOWNLOAD). */
+    @GetMapping("/documents/{documentId}/versions/{version}/download")
+    public ResponseEntity<byte[]> downloadDocumentVersion(
+            @PathVariable String caseFileId,
+            @PathVariable String documentId,
+            @PathVariable int version,
+            @AuthenticationPrincipal CustomUserDetails caller) {
+        DocumentContent content = caseDocumentService
+                .getVersionContent(caseFileId, documentId, version, caller);
+        return buildBinaryResponse(content, true);
     }
 
     /** Streams the document inline (visualización — audited as VIEW). */

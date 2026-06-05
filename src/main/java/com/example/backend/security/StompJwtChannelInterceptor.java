@@ -45,9 +45,17 @@ public class StompJwtChannelInterceptor implements ChannelInterceptor {
             if (token == null || !jwtService.isTokenValid(token) || jwtService.isExpired(token)) {
                 throw new IllegalArgumentException("Invalid or missing JWT on STOMP CONNECT");
             }
+            // ADMIN colabora en diagramas; OPERATOR/SUPERVISOR además
+            // co-editan documentos del expediente (salas /documents/*).
+            // El diseñador BPMN sigue siendo una vista solo-admin, así que
+            // ampliar el CONNECT no expone funcionalidad nueva a otros roles.
             String role = jwtService.extractRole(token);
-            if (!RoleName.ADMIN.equalsIgnoreCase(role)) {
-                throw new IllegalArgumentException("Only ADMIN users can collaborate on diagrams");
+            boolean allowed = RoleName.ADMIN.equalsIgnoreCase(role)
+                    || RoleName.SUPERVISOR.equalsIgnoreCase(role)
+                    || RoleName.OPERATOR.equalsIgnoreCase(role);
+            if (!allowed) {
+                throw new IllegalArgumentException(
+                        "Role not allowed on the collaboration channel");
             }
             String userId = jwtService.extractUserId(token);
             String email = jwtService.extractEmail(token);

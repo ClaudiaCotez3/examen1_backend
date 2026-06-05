@@ -2,6 +2,7 @@ package com.example.backend.service;
 
 import com.example.backend.dto.CaseDocumentDTO;
 import com.example.backend.dto.DocumentAuditDTO;
+import com.example.backend.dto.DocumentVersionDTO;
 import com.example.backend.dto.ExpedienteDTO;
 import com.example.backend.dto.ExpedienteFormResponseDTO;
 import com.example.backend.exception.BadRequestException;
@@ -12,6 +13,7 @@ import com.example.backend.model.Activity;
 import com.example.backend.model.ActivityInstance;
 import com.example.backend.model.CaseDocument;
 import com.example.backend.model.DocumentAuditLog;
+import com.example.backend.model.DocumentVersion;
 import com.example.backend.model.FormDefinition;
 import com.example.backend.model.FormFieldDefinition;
 import com.example.backend.model.FormResponse;
@@ -21,6 +23,7 @@ import com.example.backend.repository.ActivityInstanceRepository;
 import com.example.backend.repository.ActivityRepository;
 import com.example.backend.repository.CaseDocumentRepository;
 import com.example.backend.repository.DocumentAuditLogRepository;
+import com.example.backend.repository.DocumentVersionRepository;
 import com.example.backend.repository.FormResponseRepository;
 import com.example.backend.repository.ProcedureRepository;
 import com.example.backend.repository.UserRepository;
@@ -90,6 +93,7 @@ public class CaseDocumentService {
 
     private final CaseDocumentRepository caseDocumentRepository;
     private final DocumentAuditLogRepository documentAuditLogRepository;
+    private final DocumentVersionRepository documentVersionRepository;
     private final ProcedureRepository procedureRepository;
     private final ActivityInstanceRepository activityInstanceRepository;
     private final ActivityRepository activityRepository;
@@ -217,6 +221,7 @@ public class CaseDocumentService {
                     caseFile.getId().toHexString(), doc.getId().toHexString(), 1, file);
             doc.setStoragePath(path);
             caseDocumentRepository.save(doc);
+            recordVersion(doc, userId, now, "Carga inicial");
             audit(caseFile.getId(), doc.getId(), userId, ACTION_UPLOAD,
                     doc.getFileName() + " (v1)", now);
             stored.add(doc);
@@ -231,7 +236,8 @@ public class CaseDocumentService {
     // ── Actualización / nueva versión (TAREA 5 — EDITOR) ──────────────────
 
     public CaseDocumentDTO updateDocument(
-            String caseFileId, String documentId, MultipartFile file, CustomUserDetails caller) {
+            String caseFileId, String documentId, MultipartFile file,
+            String changeNote, CustomUserDetails caller) {
         Procedure caseFile = findCaseOrThrow(caseFileId);
         assertCanEdit(caseFile.getId(), caller);
         CaseDocument doc = findDocumentOrThrow(caseFile.getId(), documentId);
@@ -241,6 +247,10 @@ public class CaseDocumentService {
 
         ObjectId userId = callerId(caller);
         LocalDateTime now = LocalDateTime.now();
+        // Garantiza que la versión saliente exista en el historial antes de
+        // reemplazarla (documentos creados antes del versionado persistente).
+        ensureVersionHistory(doc);
+
         int nextVersion = (doc.getVersion() == null ? 1 : doc.getVersion()) + 1;
         String path = documentStorageService.store(
                 caseFile.getId().toHexString(), doc.getId().toHexString(), nextVersion, file);
@@ -255,11 +265,170 @@ public class CaseDocumentService {
         doc.setUploadedBy(userId != null ? userId : doc.getUploadedBy());
         caseDocumentRepository.save(doc);
 
+        String note = changeNote != null && !changeNote.isBlank()
+                ? changeNote.trim() : null;
+        recordVersion(doc, userId, now, note);
         audit(caseFile.getId(), doc.getId(), userId, ACTION_UPDATE,
-                doc.getFileName() + " (v" + nextVersion + ")", now);
+                doc.getFileName() + " (v" + nextVersion + ")"
+                        + (note != null ? " — " + note : ""), now);
 
         Map<ObjectId, String> names = userNames(Stream.of(doc.getUploadedBy()));
         return caseDocumentMapper.toDto(doc, names);
+    }
+
+    // ── Integración OnlyOffice (server-to-server, autorizada por token) ───
+
+    /**
+     * Binario para el Document Server de OnlyOffice. El DS no tiene la
+     * sesión del usuario: la autorización es el token firmado que emitió
+     * {@code OnlyOfficeService} al construir la configuración (ya validado
+     * por el controlador). Se audita como VIEW atribuida al usuario que
+     * abrió el editor.
+     */
+    public DocumentContent getContentForOnlyOffice(
+            String caseFileId, String documentId, ObjectId userId) {
+        Procedure caseFile = findCaseOrThrow(caseFileId);
+        CaseDocument doc = findDocumentOrThrow(caseFile.getId(), documentId);
+        if (doc.getStoragePath() == null || doc.getStoragePath().isBlank()
+                || !documentStorageService.exists(doc.getStoragePath())) {
+            throw new BadRequestException("El documento no tiene contenido almacenado.");
+        }
+        byte[] bytes = documentStorageService.load(doc.getStoragePath());
+        audit(caseFile.getId(), doc.getId(), userId, ACTION_VIEW,
+                doc.getFileName() + " (v" + doc.getVersion() + ", abierto en OnlyOffice)",
+                LocalDateTime.now());
+        String type = doc.getFileType() != null && !doc.getFileType().isBlank()
+                ? doc.getFileType() : "application/octet-stream";
+        return new DocumentContent(bytes, doc.getFileName(), type);
+    }
+
+    /**
+     * Guardado proveniente del callback de OnlyOffice: persiste los bytes
+     * editados como NUEVA VERSIÓN reutilizando exactamente el mismo
+     * versionado inmutable + auditoría del flujo manual (updateDocument).
+     */
+    public CaseDocument saveVersionFromOnlyOffice(
+            String caseFileId, String documentId, byte[] bytes, ObjectId userId) {
+        Procedure caseFile = findCaseOrThrow(caseFileId);
+        CaseDocument doc = findDocumentOrThrow(caseFile.getId(), documentId);
+        if (bytes == null || bytes.length == 0) {
+            throw new BadRequestException("Empty document payload from OnlyOffice");
+        }
+
+        LocalDateTime now = LocalDateTime.now();
+        ensureVersionHistory(doc);
+
+        int nextVersion = (doc.getVersion() == null ? 1 : doc.getVersion()) + 1;
+        String path = documentStorageService.storeBytes(
+                caseFile.getId().toHexString(), doc.getId().toHexString(),
+                nextVersion, doc.getFileName(), bytes);
+
+        doc.setSizeBytes((long) bytes.length);
+        doc.setStoragePath(path);
+        doc.setVersion(nextVersion);
+        doc.setUpdatedAt(now);
+        if (userId != null) doc.setUploadedBy(userId);
+        caseDocumentRepository.save(doc);
+
+        String note = "Edición en OnlyOffice";
+        recordVersion(doc, userId, now, note);
+        audit(caseFile.getId(), doc.getId(), userId, ACTION_UPDATE,
+                doc.getFileName() + " (v" + nextVersion + ") — " + note, now);
+        log.info("OnlyOffice save: case={} doc={} -> v{}", caseFileId, documentId, nextVersion);
+        return doc;
+    }
+
+    /** Documento + trámite validados (para construir la config del editor). */
+    public CaseDocument requireDocument(String caseFileId, String documentId) {
+        Procedure caseFile = findCaseOrThrow(caseFileId);
+        return findDocumentOrThrow(caseFile.getId(), documentId);
+    }
+
+    // ── Historial de versiones (bitácora por documento) ───────────────────
+
+    /** Versiones de un documento, la más reciente primero. */
+    public List<DocumentVersionDTO> getDocumentVersions(
+            String caseFileId, String documentId, CustomUserDetails caller) {
+        Procedure caseFile = findCaseOrThrow(caseFileId);
+        assertCanRead(caseFile.getId(), caller);
+        CaseDocument doc = findDocumentOrThrow(caseFile.getId(), documentId);
+        ensureVersionHistory(doc);
+
+        List<DocumentVersion> versions =
+                documentVersionRepository.findByDocumentoIdOrderByVersionDesc(doc.getId());
+        Map<ObjectId, String> names = userNames(versions.stream()
+                .map(DocumentVersion::getUploadedBy));
+        int currentVersion = doc.getVersion() != null ? doc.getVersion() : 1;
+        return versions.stream()
+                .map(v -> DocumentVersionDTO.builder()
+                        .version(v.getVersion() != null ? v.getVersion() : 1)
+                        .fileName(v.getFileName())
+                        .fileType(v.getFileType())
+                        .sizeBytes(v.getSizeBytes())
+                        .uploadedBy(v.getUploadedBy() != null
+                                ? v.getUploadedBy().toHexString() : null)
+                        .uploadedByName(names.get(v.getUploadedBy()))
+                        .uploadedAt(v.getUploadedAt())
+                        .changeNote(v.getChangeNote())
+                        .current(v.getVersion() != null && v.getVersion() == currentVersion)
+                        .hasContent(documentStorageService.exists(v.getStoragePath()))
+                        .build())
+                .toList();
+    }
+
+    /** Descarga el binario de UNA versión específica (auditado). */
+    public DocumentContent getVersionContent(
+            String caseFileId, String documentId, int version, CustomUserDetails caller) {
+        Procedure caseFile = findCaseOrThrow(caseFileId);
+        assertCanRead(caseFile.getId(), caller);
+        CaseDocument doc = findDocumentOrThrow(caseFile.getId(), documentId);
+        ensureVersionHistory(doc);
+
+        DocumentVersion snapshot = documentVersionRepository
+                .findByDocumentoIdAndVersion(doc.getId(), version)
+                .orElseThrow(() -> new BadRequestException(
+                        "El documento no tiene una versión " + version));
+        if (!documentStorageService.exists(snapshot.getStoragePath())) {
+            throw new BadRequestException(
+                    "El contenido de la versión " + version + " ya no está disponible.");
+        }
+        byte[] bytes = documentStorageService.load(snapshot.getStoragePath());
+        audit(caseFile.getId(), doc.getId(), callerId(caller), ACTION_DOWNLOAD,
+                snapshot.getFileName() + " (v" + version + ", versión histórica)",
+                LocalDateTime.now());
+        String type = snapshot.getFileType() != null && !snapshot.getFileType().isBlank()
+                ? snapshot.getFileType() : "application/octet-stream";
+        return new DocumentContent(bytes, snapshot.getFileName(), type);
+    }
+
+    /** Snapshot inmutable de la versión vigente del documento. */
+    private void recordVersion(CaseDocument doc, ObjectId userId,
+                               LocalDateTime when, String changeNote) {
+        documentVersionRepository.save(DocumentVersion.builder()
+                .documentoId(doc.getId())
+                .tramiteId(doc.getTramiteId())
+                .version(doc.getVersion() != null ? doc.getVersion() : 1)
+                .fileName(doc.getFileName())
+                .fileType(doc.getFileType())
+                .sizeBytes(doc.getSizeBytes())
+                .storagePath(doc.getStoragePath())
+                .uploadedBy(userId)
+                .uploadedAt(when)
+                .changeNote(changeNote)
+                .build());
+    }
+
+    /**
+     * Backfill perezoso: documentos creados antes del versionado persistente
+     * obtienen su fila de historial con los datos vigentes la primera vez
+     * que alguien consulta o edita su historial. Idempotente.
+     */
+    private void ensureVersionHistory(CaseDocument doc) {
+        if (doc.getStoragePath() == null || doc.getStoragePath().isBlank()) return;
+        if (documentVersionRepository.existsByDocumentoId(doc.getId())) return;
+        recordVersion(doc, doc.getUploadedBy(),
+                doc.getUpdatedAt() != null ? doc.getUpdatedAt() : doc.getUploadedAt(),
+                null);
     }
 
     // ── Contenido: visualizar / descargar (TAREA 5 + auditoría TAREA 6) ──
@@ -411,6 +580,7 @@ public class CaseDocumentService {
                 target.setUpdatedAt(now);
                 if (target.getUploadedBy() == null) target.setUploadedBy(userId);
                 caseDocumentRepository.save(target);
+                recordVersion(target, userId, now, "Adjunto del formulario inicial");
                 audit(caseFile.getId(), target.getId(), userId, ACTION_UPLOAD,
                         target.getFileName() + " (contenido del formulario inicial)", now);
                 touched.add(target);
@@ -431,6 +601,7 @@ public class CaseDocumentService {
                         caseFile.getId().toHexString(), doc.getId().toHexString(), 1, file);
                 doc.setStoragePath(path);
                 caseDocumentRepository.save(doc);
+                recordVersion(doc, userId, now, "Adjunto del formulario inicial");
                 audit(caseFile.getId(), doc.getId(), userId, ACTION_UPLOAD,
                         doc.getFileName() + " (formulario inicial)", now);
                 touched.add(doc);
