@@ -2,6 +2,7 @@ package com.example.backend.service;
 
 import com.example.backend.dto.ConsultationCaseDTO;
 import com.example.backend.dto.MobileLoginResponseDTO;
+import com.example.backend.dto.MobileNotificationDTO;
 import com.example.backend.dto.MobilePolicyDTO;
 import com.example.backend.dto.MobileStartCaseRequestDTO;
 import com.example.backend.dto.StartCaseRequestDTO;
@@ -11,8 +12,12 @@ import com.example.backend.mapper.BusinessPolicyMapper;
 import com.example.backend.mapper.FormMapper;
 import com.example.backend.model.BusinessPolicy;
 import com.example.backend.model.Customer;
+import com.example.backend.model.CustomerDevice;
+import com.example.backend.model.CustomerNotification;
 import com.example.backend.model.Procedure;
 import com.example.backend.repository.BusinessPolicyRepository;
+import com.example.backend.repository.CustomerDeviceRepository;
+import com.example.backend.repository.CustomerNotificationRepository;
 import com.example.backend.repository.CustomerRepository;
 import com.example.backend.repository.ProcedureRepository;
 import lombok.RequiredArgsConstructor;
@@ -20,6 +25,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.bson.types.ObjectId;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDateTime;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
@@ -51,6 +57,8 @@ public class MobilePortalService {
     private final CustomerRepository customerRepository;
     private final ProcedureRepository procedureRepository;
     private final BusinessPolicyRepository businessPolicyRepository;
+    private final CustomerDeviceRepository customerDeviceRepository;
+    private final CustomerNotificationRepository customerNotificationRepository;
     private final ConsultationService consultationService;
     private final WorkflowEngineService workflowEngineService;
     private final FormMapper formMapper;
@@ -191,6 +199,61 @@ public class MobilePortalService {
                 .policyId(request.getPolicyId())
                 .startFormData(data)
                 .build());
+    }
+
+    // ── Notificaciones push (FCM) ─────────────────────────────────────────
+
+    /**
+     * Registra (upsert por token) el dispositivo del cliente para push.
+     * Si otro cliente inicia sesión en el mismo teléfono, el token se
+     * re-asigna — el dueño anterior deja de recibir avisos en ese equipo.
+     */
+    public void registerDevice(String email, String ci, String fcmToken, String platform) {
+        Customer customer = authenticate(email, ci);
+        String token = clean(fcmToken);
+        if (token == null) {
+            throw new BadRequestException("fcmToken es obligatorio");
+        }
+        CustomerDevice device = customerDeviceRepository.findFirstByFcmToken(token)
+                .orElseGet(() -> CustomerDevice.builder().fcmToken(token).build());
+        device.setClienteId(customer.getId());
+        device.setPlataforma(clean(platform));
+        device.setFechaActualizacion(LocalDateTime.now());
+        customerDeviceRepository.save(device);
+        log.info("Dispositivo registrado para push: cliente={} plataforma={}",
+                customer.getId(), platform);
+    }
+
+    /** Últimas notificaciones del cliente (campanita de la app). */
+    public List<MobileNotificationDTO> getNotifications(String email, String ci) {
+        Customer customer = authenticate(email, ci);
+        return customerNotificationRepository
+                .findTop50ByClienteIdOrderByFechaDesc(customer.getId()).stream()
+                .map(n -> MobileNotificationDTO.builder()
+                        .id(n.getId().toHexString())
+                        .caseId(n.getTramiteId() != null
+                                ? n.getTramiteId().toHexString() : null)
+                        .caseCode(n.getCaseCode())
+                        .type(n.getTipo())
+                        .title(n.getTitulo())
+                        .message(n.getMensaje())
+                        .createdAt(n.getFecha())
+                        .read(n.isLeida())
+                        .build())
+                .toList();
+    }
+
+    /** Marca como leídas todas las notificaciones del cliente. */
+    public void markNotificationsRead(String email, String ci) {
+        Customer customer = authenticate(email, ci);
+        List<CustomerNotification> unread =
+                customerNotificationRepository.findByClienteIdAndLeidaFalse(customer.getId());
+        for (CustomerNotification notification : unread) {
+            notification.setLeida(true);
+        }
+        if (!unread.isEmpty()) {
+            customerNotificationRepository.saveAll(unread);
+        }
     }
 
     private String clean(String raw) {

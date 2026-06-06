@@ -34,3 +34,6 @@ build/
 
 ### Gestion Documental — expediente binaries (filesystem storage) ###
 storage/
+
+### Credenciales (Firebase service account, etc.) — NUNCA commitear ###
+config/

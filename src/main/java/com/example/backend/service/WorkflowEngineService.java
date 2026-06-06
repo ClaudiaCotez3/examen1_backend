@@ -95,6 +95,7 @@ public class WorkflowEngineService {
     private final FormService formService;
     private final CaseDocumentService caseDocumentService;
     private final CustomerResolutionService customerResolutionService;
+    private final CustomerNotificationService customerNotificationService;
 
     private final CaseFileMapper caseFileMapper;
     private final ActivityInstanceMapper activityInstanceMapper;
@@ -233,6 +234,9 @@ public class WorkflowEngineService {
 
         log.info("Case started: caseFile={}, policy={}, version={}",
                 caseFile.getId(), policyObjectId, activeVersion.getId());
+
+        // Push al cliente: su trámite quedó registrado y en marcha.
+        customerNotificationService.notifyCaseStarted(caseFile, policy.getNombre());
 
         return StartCaseResponseDTO.builder()
                 .caseId(caseFile.getId().toHexString())
@@ -541,6 +545,14 @@ public class WorkflowEngineService {
                 .collect(Collectors.toMap(ActivityInstance::getActividadId, Function.identity(),
                         (a, b) -> a));
 
+        // Lane de la actividad recién completada — si una tarea se desbloquea
+        // en una lane DISTINTA, el trámite cambió de área y el cliente
+        // recibe push (una sola vez por área en esta pasada).
+        Activity completedActivity = activitiesById.get(completedActivityId);
+        ObjectId completedLaneId = completedActivity != null
+                ? completedActivity.getCalleId() : null;
+        Set<ObjectId> notifiedLanes = new HashSet<>();
+
         Set<ObjectId> visited = new HashSet<>();
         Deque<ObjectId> queue = new ArrayDeque<>();
         queue.add(completedActivityId);
@@ -560,6 +572,15 @@ public class WorkflowEngineService {
                         activityInstanceRepository.save(inst);
                         log.info("Unblocked TASK {} ('{}') on caseFile {}",
                                 targetId, target.getNombre(), caseFile.getId());
+
+                        // Push al cliente: el trámite avanzó a otra área.
+                        ObjectId targetLaneId = target.getCalleId();
+                        if (targetLaneId != null
+                                && !targetLaneId.equals(completedLaneId)
+                                && notifiedLanes.add(targetLaneId)) {
+                            customerNotificationService
+                                    .notifyAreaChanged(caseFile, targetLaneId);
+                        }
                     }
                 } else if (isGatewayType(target.getTipo())) {
                     queue.add(targetId); // walk through gateway (DECISION or PARALLEL fork)
@@ -973,6 +994,9 @@ public class WorkflowEngineService {
             caseFile.setFechaFin(now);
             procedureRepository.save(caseFile);
             log.info("Process completed: caseFile={}", caseFile.getId());
+
+            // Push al cliente: su trámite terminó.
+            customerNotificationService.notifyCaseFinished(caseFile);
         }
     }
 
