@@ -23,7 +23,8 @@ import java.time.LocalDateTime;
  *   - ACTIVITY    → attachments submitted on an activity's dynamic form.
  *   - EXPEDIENTE  → direct uploads from the Expediente screen (EDITOR only).
  *
- * The binary lives on the filesystem (see DocumentStorageService) and the
+ * The binary lives in the active storage backend — filesystem or AWS S3
+ * (see {@link com.example.backend.service.DocumentStorage}) — and the
  * row keeps the {@code storagePath} reference — never the bytes — following
  * the project's "references over blobs" Mongo philosophy. "Actualizar"
  * replaces the binary and bumps {@link #version}; the previous file is kept

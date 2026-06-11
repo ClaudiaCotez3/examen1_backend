@@ -100,7 +100,7 @@ public class CaseDocumentService {
     private final UserRepository userRepository;
     private final FormResponseRepository formResponseRepository;
 
-    private final DocumentStorageService documentStorageService;
+    private final DocumentStorage documentStorageService;
     private final CaseFileService caseFileService;
     private final OperatorService operatorService;
     private final CaseDocumentMapper caseDocumentMapper;

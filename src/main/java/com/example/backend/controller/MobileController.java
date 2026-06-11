@@ -52,14 +52,24 @@ public class MobileController {
         return ResponseEntity.ok(mobilePortalService.getCases(email, ci));
     }
 
+    /**
+     * Catálogo de políticas. El correo + CI son opcionales: si el cliente
+     * ya está registrado, el formulario inicial vuelve sin los campos
+     * reservados cliente_* (no le pedimos datos que ya tenemos).
+     */
     @GetMapping("/policies")
-    public ResponseEntity<List<MobilePolicyDTO>> listPolicies() {
-        return ResponseEntity.ok(mobilePortalService.listPolicies());
+    public ResponseEntity<List<MobilePolicyDTO>> listPolicies(
+            @RequestParam(required = false) String email,
+            @RequestParam(required = false) String ci) {
+        return ResponseEntity.ok(mobilePortalService.listPolicies(email, ci));
     }
 
     @GetMapping("/policies/{policyId}")
-    public ResponseEntity<MobilePolicyDTO> getPolicy(@PathVariable String policyId) {
-        return ResponseEntity.ok(mobilePortalService.getPolicy(policyId));
+    public ResponseEntity<MobilePolicyDTO> getPolicy(
+            @PathVariable String policyId,
+            @RequestParam(required = false) String email,
+            @RequestParam(required = false) String ci) {
+        return ResponseEntity.ok(mobilePortalService.getPolicy(policyId, email, ci));
     }
 
     @PostMapping("/start-case")

@@ -1,6 +1,8 @@
 package com.example.backend.service;
 
 import com.example.backend.dto.ConsultationCaseDTO;
+import com.example.backend.dto.FormDefinitionDTO;
+import com.example.backend.dto.FormFieldDTO;
 import com.example.backend.dto.MobileLoginResponseDTO;
 import com.example.backend.dto.MobileNotificationDTO;
 import com.example.backend.dto.MobilePolicyDTO;
@@ -125,33 +127,71 @@ public class MobilePortalService {
 
     // ── Catálogo de políticas (Módulo 3) ──────────────────────────────────
 
-    /** Políticas disponibles para iniciar trámite (excluye archivadas). */
-    public List<MobilePolicyDTO> listPolicies() {
+    /**
+     * Políticas disponibles para iniciar trámite (excluye archivadas).
+     *
+     * Si llegan credenciales válidas (cliente ya registrado), se ocultan
+     * los campos reservados cliente_* del formulario inicial: la app no
+     * debe volver a pedir datos que ya conocemos. El motor los sobreescribe
+     * con la identidad verificada al iniciar el caso de todos modos.
+     */
+    public List<MobilePolicyDTO> listPolicies(String email, String ci) {
+        boolean stripCustomerFields = isReturningCustomer(email, ci);
         return businessPolicyRepository.findAll().stream()
                 .filter(p -> !"ARCHIVED".equals(p.getEstado()))
                 .sorted(Comparator.comparing(
                         BusinessPolicy::getNombre,
                         Comparator.nullsLast(String.CASE_INSENSITIVE_ORDER)))
-                .map(this::toPolicyDto)
+                .map(p -> toPolicyDto(p, stripCustomerFields))
                 .toList();
     }
 
-    public MobilePolicyDTO getPolicy(String policyId) {
+    public MobilePolicyDTO getPolicy(String policyId, String email, String ci) {
         if (policyId == null || !ObjectId.isValid(policyId)) {
             throw new BadRequestException("Invalid policyId: " + policyId);
         }
         BusinessPolicy policy = businessPolicyRepository.findById(new ObjectId(policyId))
                 .orElseThrow(() -> new BadRequestException("Política no encontrada: " + policyId));
-        return toPolicyDto(policy);
+        return toPolicyDto(policy, isReturningCustomer(email, ci));
     }
 
-    private MobilePolicyDTO toPolicyDto(BusinessPolicy policy) {
+    /**
+     * ¿El par correo + CI corresponde a un cliente ya registrado? Best-effort
+     * y silencioso: un invitado nuevo (o credenciales ausentes/erróneas)
+     * simplemente recibe el formulario completo con los campos cliente_*.
+     */
+    private boolean isReturningCustomer(String email, String ci) {
+        if (clean(email) == null || clean(ci) == null) {
+            return false;
+        }
+        try {
+            authenticate(email, ci);
+            return true;
+        } catch (BadRequestException ignored) {
+            return false;
+        }
+    }
+
+    private MobilePolicyDTO toPolicyDto(BusinessPolicy policy, boolean stripCustomerFields) {
+        FormDefinitionDTO form = formMapper.toDefinitionDTO(policy.getStartFormDefinition());
+        if (stripCustomerFields && form != null && form.getFields() != null) {
+            List<FormFieldDTO> visible = form.getFields().stream()
+                    .filter(f -> f == null || !isReservedCustomerField(f.getName()))
+                    .toList();
+            form = FormDefinitionDTO.builder().fields(visible).build();
+        }
         return MobilePolicyDTO.builder()
                 .id(policy.getId() != null ? policy.getId().toHexString() : null)
                 .name(policy.getNombre())
                 .description(policy.getDescripcion())
-                .startFormDefinition(formMapper.toDefinitionDTO(policy.getStartFormDefinition()))
+                .startFormDefinition(form)
                 .build();
+    }
+
+    private static boolean isReservedCustomerField(String name) {
+        return BusinessPolicyMapper.CUSTOMER_NAME_FIELD.equals(name)
+                || BusinessPolicyMapper.CUSTOMER_EMAIL_FIELD.equals(name)
+                || BusinessPolicyMapper.CUSTOMER_CI_FIELD.equals(name);
     }
 
     // ── Iniciar trámite desde la app (Módulo 3) ───────────────────────────

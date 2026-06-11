@@ -28,7 +28,22 @@
 	</scm>
 	<properties>
 		<java.version>21</java.version>
+		<aws.sdk.version>2.28.29</aws.sdk.version>
 	</properties>
+
+	<dependencyManagement>
+		<dependencies>
+			<!-- AWS SDK v2 BOM: alinea las versiones de los módulos de AWS. -->
+			<dependency>
+				<groupId>software.amazon.awssdk</groupId>
+				<artifactId>bom</artifactId>
+				<version>${aws.sdk.version}</version>
+				<type>pom</type>
+				<scope>import</scope>
+			</dependency>
+		</dependencies>
+	</dependencyManagement>
+
 	<dependencies>
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
@@ -88,6 +103,12 @@
 			<groupId>com.google.firebase</groupId>
 			<artifactId>firebase-admin</artifactId>
 			<version>9.3.0</version>
+		</dependency>
+		<!-- AWS S3: backend de almacenamiento de documentos del expediente
+		     cuando app.documents.storage-backend=s3 (ver DocumentStorage). -->
+		<dependency>
+			<groupId>software.amazon.awssdk</groupId>
+			<artifactId>s3</artifactId>
 		</dependency>
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
